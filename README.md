@@ -21,11 +21,12 @@ próprio. Rodar de novo atualiza para a última versão.
 | Quero... | Como |
 |---|---|
 | Uma versão específica | `curl -fsSL .../install.sh \| bash -s v0.1.1` |
-| Debian, Ubuntu e derivados | `sudo apt install ./automacli_<versão>_amd64.deb` |
-| Fedora, RHEL, openSUSE | `sudo dnf install ./automacli-<versão>-1.x86_64.rpm` |
-| Arch, Manjaro | `PKGBUILD` do pacote `automacli-bin`, com `makepkg -si` |
+| Debian, Ubuntu e derivados | `curl -fsSLO https://github.com/Gustavo210/automacli-releases/releases/latest/download/automacli_amd64.deb && sudo apt install ./automacli_amd64.deb` |
+| Fedora, RHEL | `sudo dnf install https://github.com/Gustavo210/automacli-releases/releases/latest/download/automacli.x86_64.rpm` |
+| openSUSE | `sudo zypper install https://github.com/Gustavo210/automacli-releases/releases/latest/download/automacli.x86_64.rpm` |
+| Arch, Manjaro | `curl -fsSLO https://github.com/Gustavo210/automacli-releases/releases/latest/download/PKGBUILD && makepkg -si` |
 | Desinstalar | `rm -rf ~/.local/share/automacli ~/.local/bin/automacli` |
 
-Os arquivos de cada release, os checksums (`SHA256SUMS`) e as notas estão na página de
+Em máquinas ARM troque `amd64`/`x86_64` por `arm64`/`aarch64`. Os arquivos de cada release, os checksums (`SHA256SUMS`) e as notas estão na página de
 [Releases](https://github.com/Gustavo210/automacli-releases/releases). O `install.sh` confere o SHA-256 antes de
 instalar.
