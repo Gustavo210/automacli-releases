@@ -7,6 +7,7 @@ Este repositório hospeda a **documentação** e os **releases** do automacli. O
 
 - Documentação: https://gustavo210.github.io/automacli-releases/
 - Releases: https://github.com/Gustavo210/automacli-releases/releases
+- Para LLMs: [`llms.txt`](https://gustavo210.github.io/automacli-releases/llms.txt) (índice) e [`llms-full.txt`](https://gustavo210.github.io/automacli-releases/llms-full.txt) (documentação inteira em Markdown)
 
 ## Instalar
 
