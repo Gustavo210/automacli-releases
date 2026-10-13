@@ -2,8 +2,8 @@
 
 Várias branches do mesmo repositório rodando lado a lado, cada uma com sua stack Docker isolada.
 
-Este repositório hospeda a **documentação** e os **releases** do automacli. O código-fonte fica em
-[`Gustavo210/automacli`](https://github.com/Gustavo210/automacli).
+Este repositório é a área de distribuição do automacli: a **documentação** e os **releases** prontos para
+instalar. O código-fonte é mantido em um repositório privado.
 
 - Documentação: https://gustavo210.github.io/automacli-releases/
 - Releases: https://github.com/Gustavo210/automacli-releases/releases
