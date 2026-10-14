@@ -21,12 +21,12 @@ próprio. Rodar de novo atualiza para a última versão.
 | Quero... | Como |
 |---|---|
 | Uma versão específica | `curl -fsSL .../install.sh \| bash -s v0.1.1` |
-| Debian, Ubuntu e derivados | `curl -fsSLO https://github.com/Gustavo210/automacli-releases/releases/latest/download/automacli_amd64.deb && sudo apt install ./automacli_amd64.deb` |
-| Fedora, RHEL | `sudo dnf install https://github.com/Gustavo210/automacli-releases/releases/latest/download/automacli.x86_64.rpm` |
-| openSUSE | `sudo zypper install https://github.com/Gustavo210/automacli-releases/releases/latest/download/automacli.x86_64.rpm` |
-| Arch, Manjaro | `curl -fsSLO https://github.com/Gustavo210/automacli-releases/releases/latest/download/PKGBUILD && makepkg -si` |
+| Debian, Ubuntu e derivados | `sudo curl -fsSLo /usr/share/keyrings/automacli.gpg https://gustavo210.github.io/automacli-releases/apt/automacli.gpg && sudo curl -fsSLo /etc/apt/sources.list.d/automacli.sources https://gustavo210.github.io/automacli-releases/apt/automacli.sources && sudo apt update && sudo apt install automacli` |
+| Fedora, RHEL | `sudo curl -fsSLo /etc/yum.repos.d/automacli.repo https://gustavo210.github.io/automacli-releases/rpm/automacli.repo && sudo dnf install automacli` |
+| openSUSE | `sudo zypper addrepo -f https://gustavo210.github.io/automacli-releases/rpm/automacli.repo && sudo zypper --gpg-auto-import-keys install automacli` |
+| Arch, Manjaro | `yay -S automacli-bin` (AUR) |
 | Desinstalar | `rm -rf ~/.local/share/automacli ~/.local/bin/automacli` |
 
-Em máquinas ARM troque `amd64`/`x86_64` por `arm64`/`aarch64`. Os arquivos de cada release, os checksums (`SHA256SUMS`) e as notas estão na página de
+Os repositórios apt e rpm são assinados pela chave `automacli packages` (`1C27 7A0D 3569 3660 D604 431F B108 4A86 A1CD 6EA3`) e atendem `amd64`/`x86_64` e `arm64`/`aarch64`; as atualizações vêm pelo gerenciador de pacotes. Os arquivos de cada release, os checksums (`SHA256SUMS`) e as notas estão na página de
 [Releases](https://github.com/Gustavo210/automacli-releases/releases). O `install.sh` confere o SHA-256 antes de
 instalar.
