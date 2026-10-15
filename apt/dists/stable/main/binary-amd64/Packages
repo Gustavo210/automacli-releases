@@ -1,0 +1,20 @@
+Package: automacli
+Architecture: amd64
+Version: 0.2.0
+Priority: optional
+Section: devel
+Maintainer: Gustavo210 <noreply@github.com>
+Installed-Size: 161148
+Depends: git
+Recommends: docker-ce | docker.io
+Filename: pool/main/a/automacli/automacli_0.2.0_amd64.deb
+Size: 52694920
+MD5sum: 63d49bb82f292ce8aa9e0db798d22262
+SHA1: 158970273a6be82719701e41ca7318b7c9c1289b
+SHA256: d6fa08a354b7b74ff494f7dfc64ce9dd6218bbe1c8af4a322156880c2dc432f3
+SHA512: ccbba13caf01f1450029261b26e6538b237b630b906144ae9ca43fefd332856cdce1329a6a313bfaddccc6be5e5fa7a9d5bd22e8e274bb566e6072618f7e14e9
+Homepage: https://github.com/Gustavo210/automacli-releases
+Description: Várias branches do mesmo repositório lado a lado, cada uma com sua stack
+ Docker isolada em portas próprias. Traz o Node.js embutido.
+License: MIT
+

@@ -1,0 +1,6 @@
+Types: deb
+URIs: https://gustavo210.github.io/automacli-releases/apt
+Suites: stable
+Components: main
+Architectures: amd64 arm64
+Signed-By: /usr/share/keyrings/automacli.gpg
