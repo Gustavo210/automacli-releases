@@ -1,0 +1,2196 @@
+---
+url: https://gustavo210.github.io/automacli-releases/por-que.md
+---
+
+# Por que o automacli?
+
+Quem precisa de várias branches no ar ao mesmo tempo costuma chegar em uma destas três respostas: um checkout só com
+scripts à mão, `git worktree`, ou uma ferramenta que cuide do ambiente inteiro. As duas primeiras resolvem a parte do
+**código**. O problema de verdade está no que fica em volta do código: dependências instaladas, portas publicadas,
+bancos com dados, arquivos que o git não versiona e o custo de limpar tudo depois.
+
+É esse "em volta" que o automacli automatiza.
+
+## O que uma branch precisa para rodar
+
+Uma branch de um projeto com Docker não é só a árvore de arquivos. Para ela subir, é preciso:
+
+| Peça | Exemplo | De onde vem |
+|---|---|---|
+| **Código** | a branch `feat/pagamentos` | git |
+| **Dependências** | `node_modules`, `vendor`, `.venv` | `pnpm install`, `composer install`, `pip install` |
+| **Portas livres** | `3000`, `4000`, `8080` | ninguém mais pode estar usando |
+| **Serviços com estado** | Postgres, Redis, OpenSearch, SQS | um compose, volumes, seeds |
+| **Arquivos não versionados** | `.env`, scripts pessoais, instruções do agente | você, de novo, em cada cópia |
+| **Limpeza** | parar containers, apagar volumes, remover o diretório | você, quando lembrar |
+
+Cada abordagem abaixo cobre uma fatia diferente dessa tabela.
+
+## Um checkout e scripts manuais
+
+É o ponto de partida de quase todo time: um clone, `git checkout` para trocar de branch e, com o tempo, um
+`clone-task.sh` que copia o repositório e troca as portas com `sed`.
+
+O que funciona:
+
+* Não exige nada além de git e do próprio compose.
+* Um script simples resolve o primeiro caso de uso em uma tarde.
+
+Onde quebra:
+
+* **Portas na mão.** O script precisa saber todas as portas publicadas pela stack e escolher um deslocamento que não
+  colida com nenhuma outra cópia. Com `extends`, `include` e variáveis no compose, a lista muda sem avisar. O automacli
+  lê as portas com `docker compose config` e reserva um [slot](como-funciona.md#_2-slot) livre, pulando os que colidiriam com
+  outra task ([port is already allocated](solucao-de-problemas.md#port-is-already-allocated-ao-subir-a-stack)).
+* **Edita o que é do repositório.** Trocar portas com `sed` nos arquivos compose e no `.env` suja o `git status` e
+  vira conflito no próximo rebase. O automacli gera um [override](como-funciona.md#_4-override) ao lado e o esconde
+  em `.git/info/exclude`.
+* **Uma instalação por cópia.** Cada clone novo repete `pnpm install`, `composer install` e o download de imagens.
+  O automacli copia a task a partir do repo base por [snapshot ou reflink](requisitos.md): segundos, com
+  `node_modules` e `vendor` já no lugar e sem gastar disco até os arquivos divergirem.
+* **Um banco por cópia, ou um banco brigando com o outro.** Ou cada cópia sobe o seu Postgres (e cada um precisa de
+  porta, volume e seed), ou todas apontam para o mesmo e a primeira a dar `docker compose down` derruba o das outras. Os
+  [serviços compartilhados](como-funciona.md#_5-servicos-compartilhados) rodam uma vez, a partir do repo base, e,
+  no modo padrão, nenhuma task consegue derrubá-los.
+* **O script é de uma pessoa.** Ele conhece um repositório, uma máquina e um jeito de trabalhar. Quando alguém novo
+  entra, recebe o script por mensagem e descobre as pegadinhas sozinho. No automacli o que varia entre projetos fica em
+  um [perfil YAML](perfil.md) versionável; o resto é descoberto.
+* **Ninguém sabe o que está no ar.** Sem um lugar que liste as cópias, os slots e o consumo de cada uma, a máquina
+  acumula stacks esquecidas. O [monitor](monitor.md) mostra cada task com o estado do PR, CPU, memória e disco real, e
+  `automacli branches` remove uma task derrubando a stack dela antes.
+
+## git worktree
+
+`git worktree add ../feat-pagamentos feat/pagamentos` cria um segundo diretório de trabalho ligado ao mesmo `.git`.
+É a resposta certa para a pergunta "como ter duas branches abertas ao mesmo tempo", e o automacli não tenta
+substituí-la nesse ponto.
+
+O que funciona:
+
+* Faz parte do git, sem instalar nada.
+* A segunda árvore nasce em segundos e compartilha objetos, refs e stashes com a primeira.
+* Perfeito para olhar um PR, fazer um cherry-pick ou comparar dois estados do código.
+
+Onde para:
+
+* **Só o código vem junto.** `node_modules`, `vendor` e `.venv` não são versionados, então cada worktree começa vazia
+  e precisa de um install. Com pnpm e o store quente ele é barato em disco (hard links) e leva o tempo de linkar os
+  arquivos; com Composer, pip, npm ou yarn clássico é uma cópia inteira dos pacotes. A task do automacli nasce de um
+  snapshot do repo base: as dependências já estão lá, em blocos compartilhados.
+* **Portas continuam fixas.** O compose de cada worktree publica as mesmas portas; a segunda stack falha com
+  `port is already allocated`. Resolver isso é voltar aos scripts manuais do item anterior.
+* **Um banco por worktree, ou um banco brigando com o outro.** Cada worktree é um projeto compose com seus volumes,
+  então ou cada uma sobe o seu Postgres, ou todas apontam para o mesmo e qualquer `docker compose down` derruba o
+  das outras. O automacli roda os serviços com estado uma vez, a partir do repo base, fora da stack de cada task.
+* **Arquivos não versionados ficam para trás.** O `.env`, o `CLAUDE.local.md` e o script que você usa todo dia não
+  acompanham a worktree. Os [templates](instalacao.md#estrutura-do-diretorio-de-configuracao) do automacli entram em
+  toda task no mesmo caminho, automaticamente.
+
+O que o automacli faz a mais, sem que isso seja falha do worktree, que nunca se propôs a cuidar de ambiente: slot e
+override gerados, [isolamento](isolamento.md) por slice systemd com teto de memória, e o [monitor](monitor.md)
+registrando o que está no ar e quem foi morto por falta de memória. Nos dois casos vale uma branch por vez: o git
+recusa a mesma branch em duas worktrees, e o automacli cria um diretório por branch.
+
+Se o seu projeto não tem Docker e as dependências instalam em segundos, `git worktree` basta. O automacli entra
+quando a stack em volta do código pesa mais do que o código.
+
+## Lado a lado
+
+| | Checkout + scripts | `git worktree` | automacli |
+|---|---|---|---|
+| Diretório por branch | o script copia | sim | sim, task por branch |
+| Tempo até a branch rodar | clone + install | install | segundos (snapshot ou reflink) |
+| Dependências instaladas | de novo em cada cópia | de novo em cada worktree | vêm do repo base |
+| Disco por branch | uma cópia inteira | só o código, mais o install | só o que a branch muda |
+| Portas | calculadas no script | colidem | slot por task, override gerado |
+| Arquivos do repositório | editados com `sed` | intactos | intactos, override fora do git |
+| Banco, cache e busca | um por cópia, ou briga | um por worktree | uma instância, compartilhada e protegida |
+| `.env` e arquivos pessoais | copiar à mão | copiar à mão | templates em toda task |
+| Limite de memória | não | não | slice systemd por slot |
+| Visibilidade do que está no ar | `docker ps` | `git worktree list` | monitor HTTP e MCP |
+| Limpeza | à mão | `git worktree remove` | `branches` para a stack e apaga a task |
+| Configuração por projeto | um script por repositório | nenhuma | um perfil YAML, descoberto quando falta |
+
+## Quando não vale a pena
+
+* O repositório não tem stack Docker e as dependências instalam em segundos: `git worktree` resolve.
+* Você trabalha sempre em uma branch por vez e troca pouco: um checkout basta.
+* O disco das tasks não suporta reflink nem btrfs: o automacli continua funcionando, caindo para `git clone --reference` (e, sem repo base, `git clone`), mas a
+  vantagem de tempo e disco diminui. Veja o que a sua máquina tem com `automacli doctor` em
+  [Requisitos e ambiente](requisitos.md).
+
+## Para seguir
+
+* [Como funciona](como-funciona.md): slots, portas, override e serviços compartilhados em detalhe.
+* [Instalação](instalacao.md): o executável pronto e os pacotes por distribuição.
+* [Exemplos](exemplos.md): perfis prontos para copiar.
+
+---
+
+---
+url: https://gustavo210.github.io/automacli-releases/instalacao.md
+---
+
+# Instalação
+
+## Instalar
+
+### Executável pronto (recomendado)
+
+Não precisa de Node: o pacote traz o próprio.
+
+```sh
+curl -fsSL https://github.com/Gustavo210/automacli-releases/releases/latest/download/install.sh | bash
+```
+
+Instala em `~/.local/share/automacli` e cria `~/.local/bin/automacli`. Versões específicas, repositório privado e instalação manual estão em [Releases e CI/CD](releases.md).
+
+### Pela sua distribuição
+
+Cada release também alimenta um repositório **apt** e um **rpm**, assinados, servidos ao lado desta documentação. Você
+adiciona a fonte uma vez, instala pelo gerenciador, e o `apt upgrade`, o `dnf upgrade` ou o `zypper update` de sempre
+trazem as versões novas. O comando fica em `/usr/bin/automacli`, com `git` como dependência e Docker como recomendação.
+Arquiteturas: `amd64`/`x86_64` e `arm64`/`aarch64`.
+
+::: code-group
+
+```sh [Debian / Ubuntu]
+sudo curl -fsSLo /usr/share/keyrings/automacli.gpg https://gustavo210.github.io/automacli-releases/apt/automacli.gpg
+sudo curl -fsSLo /etc/apt/sources.list.d/automacli.sources https://gustavo210.github.io/automacli-releases/apt/automacli.sources
+sudo apt update && sudo apt install automacli
+```
+
+```sh [Fedora / RHEL]
+sudo curl -fsSLo /etc/yum.repos.d/automacli.repo https://gustavo210.github.io/automacli-releases/rpm/automacli.repo
+sudo dnf install automacli
+```
+
+```sh [openSUSE]
+sudo zypper addrepo -f https://gustavo210.github.io/automacli-releases/rpm/automacli.repo
+sudo zypper --gpg-auto-import-keys install automacli
+```
+
+```sh [Arch / Manjaro]
+# Pacote automacli-bin no AUR, com o seu helper preferido
+yay -S automacli-bin        # ou: paru -S automacli-bin
+```
+
+```sh [Outra distribuição]
+# Qualquer Linux x64 ou arm64: o instalador do executável, sem root
+curl -fsSL https://github.com/Gustavo210/automacli-releases/releases/latest/download/install.sh | bash
+```
+
+:::
+
+Os índices dos repositórios e os RPMs são assinados pela chave `automacli packages`, impressão digital
+`1C27 7A0D 3569 3660 D604 431F B108 4A86 A1CD 6EA3`, publicada em
+[`apt/automacli.asc`](https://gustavo210.github.io/automacli-releases/apt/automacli.asc) e
+[`rpm/RPM-GPG-KEY-automacli`](https://gustavo210.github.io/automacli-releases/rpm/RPM-GPG-KEY-automacli).
+Os repositórios guardam as três últimas versões; as anteriores continuam na página de
+[Releases](https://github.com/Gustavo210/automacli-releases/releases), onde cada pacote também pode ser baixado
+avulso (`automacli_amd64.deb`, `automacli.x86_64.rpm`, `PKGBUILD`), com o `SHA256SUMS`.
+
+Para remover: `sudo apt remove automacli`, `sudo dnf remove automacli`, `sudo zypper remove automacli` ou
+`sudo pacman -R automacli-bin`.
+
+### Instalação manual
+
+Sem o instalador: baixe o tarball da sua arquitetura (`x64` ou `arm64`) no [release](https://github.com/Gustavo210/automacli-releases/releases/latest), extraia e aponte um link para o executável. O tarball traz o Node embutido.
+
+```sh
+curl -fsSLO https://github.com/Gustavo210/automacli-releases/releases/latest/download/automacli-linux-x64.tar.gz
+mkdir -p ~/.local/share/automacli ~/.local/bin
+tar -xzf automacli-linux-x64.tar.gz -C ~/.local/share/automacli --strip-components=1
+ln -sf ~/.local/share/automacli/bin/automacli ~/.local/bin/automacli
+```
+
+Confirme com `automacli --version`.
+
+## Atualizar
+
+```sh
+automacli update            # correções e novidades compatíveis
+automacli update --check    # só diz se há versão nova
+automacli update --major    # aceita um salto de versão maior
+```
+
+Instalado pelo executável, o `update` baixa a versão nova, confere o checksum e troca o diretório de uma vez.
+Instalado por pacote, ele mostra o comando do seu gerenciador, que é quem atualiza (`apt`, `dnf`, `zypper`, `yay`).
+Qualquer comando no terminal avisa, uma vez por dia, quando há versão nova. Detalhes em
+[Comandos › update](comandos.md#automacli-update).
+
+## Configuração global
+
+Na primeira execução o automacli cria `~/.config/automacli/config.json` (ou `$XDG_CONFIG_HOME/automacli/config.json`). Esse arquivo guarda o que vale para a **sua máquina**, independentemente do repositório.
+
+```json
+{
+  "githubToken": "ghp_xxx",
+  "clonePath": "/home/voce/tasks"
+}
+```
+
+| Campo | Padrão | Para que serve |
+|---|---|---|
+| `cloneStrategy` | `auto` | Como as tasks nascem do repo base: `auto`, `snapshot`, `reflink`, `git-reference` ou `git`. Veja [Requisitos](requisitos.md#como-as-tasks-sao-criadas). |
+| `notifications` | `true` | Aviso de desktop do monitor quando um serviço morre por falta de memória. |
+| `githubToken` | — | Token usado para consultar o repositório e os pull requests. Necessário para repositórios privados e para não bater no limite de requisições sem autenticação. |
+| `clonePath` | `~/tasks` | Diretório onde as tasks são criadas. |
+| `packageFilter` | — | Regex padrão do `automacli outdated` (ex.: `^@minha-org`). |
+| `scanDirectories` | — | Diretórios esperados pelo `automacli outdated`. |
+| `setup.repos` | `[]` | Repositórios locais percorridos por `automacli setup all`. |
+| `setup.branchOverrides` | `{}` | Trecho do caminho → branch principal, quando ela não é a de `origin/HEAD`. |
+| `verdaccioStoragePath` | `~/.local/share/verdaccio/storage` | Armazenamento limpo por `automacli cleanup --verdaccio*`. |
+
+O token precisa de leitura no repositório (escopo `repo` em tokens clássicos). Ele fica em texto puro nesse arquivo: mantenha-o fora de repositórios e backups compartilhados.
+
+## Estrutura do diretório de configuração
+
+```text
+~/.config/automacli/
+├── config.json                    # configuração global (acima)
+├── repos/
+│   └── <owner>-<repo>.yml         # perfil de cada repositório
+└── templates/
+    └── <owner>-<repo>/            # arquivos injetados em cada task desse repo
+        ├── .env.template
+        └── scripts/algo.sh.template
+```
+
+* **Perfis** descrevem como isolar um repositório. Veja [Perfil do repositório](perfil.md).
+* **Templates** são arquivos copiados para dentro de cada task logo após o clone, no mesmo caminho relativo, com o sufixo `.template` removido. Servem para o que não é versionado: `.env` com seus segredos, scripts pessoais. Arquivos `.sh` ficam executáveis.
+
+### Placeholders nos templates
+
+Um template pode conter `{{placeholders}}`, trocados ao copiar para a task:
+
+| Placeholder | Valor | Exemplo no slot 4 |
+|---|---|---|
+| `{{slot}}` | Número do slot | `4` |
+| `{{slotSuffix}}` | `-slot<N>`; vazio no slot 0 (repo base) | `-slot4` |
+| `{{queueSuffix}}` | Sufixo das filas SQS ([`queues.suffix`](perfil.md#queues)); vazio no slot 0 ou sem ElasticMQ compartilhado | `-slot4` |
+| `{{composeProject}}` | Projeto compose da task | `minha-api-slot4` |
+| `{{branch}}`, `{{owner}}`, `{{repo}}` | Branch e repositório | `feat/x`, `minha-org`, `minha-api` |
+
+É assim que um ElasticMQ compartilhado recebe filas por task: `SQS_SUFFIX={{queueSuffix}}` no `.env.template` e, num
+arquivo que liste URLs de fila, `…/gerar-pagamento{{queueSuffix}}.fifo`. Arquivos binários são copiados sem
+alteração, e um `{{nome}}` desconhecido fica como está.
+
+## Primeiro uso
+
+```sh
+automacli doctor             # o que esta máquina oferece e o que o automacli vai usar
+cd ~/projetos/minha-api      # um checkout qualquer do repositório
+automacli init               # configura a máquina (1ª vez) e grava o perfil do repositório
+automacli profile            # mostra o perfil em vigor e as portas por slot
+```
+
+Enquanto não houver token gravado (normalmente na primeira execução), o `init` pergunta o diretório das tasks, o token do GitHub, a estratégia de clone e, se a máquina tem `notify-send`, se quer notificações, e grava tudo no `config.json`; `automacli init --global` repete só essa parte. Em seguida ele lê os arquivos compose da raiz, sugere quais serviços são compartilhados (bancos, caches, filas) e grava `~/.config/automacli/repos/<owner>-<repo>.yml`. Com `--local` ele grava `.automacli.yml` na raiz do repositório, para o time versionar um perfil comum.
+
+Depois disso:
+
+```sh
+automacli clone minha-feature -f minha-org/minha-api
+```
+
+---
+
+---
+url: https://gustavo210.github.io/automacli-releases/requisitos.md
+---
+
+# Requisitos e ambiente
+
+O automacli precisa de pouco para funcionar e aproveita o que a máquina oferece a mais. Nada além de git e Docker é obrigatório; cada recurso opcional melhora algo e, quando falta, o automacli usa a alternativa sozinho.
+
+Para ver o que a sua máquina tem e o que o automacli vai fazer com isso:
+
+```sh
+automacli doctor
+automacli doctor --repo minha-org/minha-api     # avalia a estratégia de clone com o repo base
+```
+
+## Obrigatório
+
+| | Para quê |
+|---|---|
+| **git** | Clonar e acompanhar as branches. |
+| **Docker com Compose v2.24 ou superior** | Subir as stacks. O override gerado usa a tag `!override`, que o Compose só aceita a partir da 2.24. |
+
+O executável dos releases traz o próprio Node.js; para rodar do código-fonte é preciso Node 22 ou superior.
+
+## Opcional
+
+| Recurso | O que melhora | Sem ele |
+|---|---|---|
+| **btrfs** no diretório das tasks | Clones por snapshot (instantâneos) ou reflink; uso real de disco no monitor | Clones por `git clone --reference`; o monitor mostra só o tamanho aparente |
+| **XFS ou APFS** (macOS) | Clones por reflink | Idem |
+| **btrfs-progs** (`btrfs`) | Snapshot e medição de disco | Reflink continua funcionando |
+| Montagem com `user_subvol_rm_allowed` | Apagar uma task por snapshot devolve o disco na hora | A task é movida para `.lixeira/` (instantâneo) e apagada em segundo plano; o disco volta em alguns minutos |
+| **systemd** | Isolamento de CPU e memória por slot; monitor como serviço | Sem isolamento; monitor iniciado à mão |
+| **journalctl** | `automacli oom` identifica mortes pelo systemd-oomd e pelo kernel, com o motivo | `automacli oom` usa só o que o Docker registra |
+| **notify-send** | Aviso de desktop quando um serviço morre por falta de memória | Aviso só no log do monitor |
+| **wl-copy, xclip, xsel, pbcopy** | O `clone` copia o `cd` da task | O `clone` imprime o `cd` |
+
+## Como as tasks são criadas
+
+O `clone` cria a task a partir do **repo base** (uma task mantida na branch principal) com a melhor estratégia disponível, caindo para a seguinte se uma falhar:
+
+| Estratégia | Exige | Tempo em um repo de 9 GB e 875 mil arquivos | Traz `node_modules` instalado |
+|---|---|---|---|
+| **snapshot** | btrfs, btrfs-progs e repo base convertido em subvolume | < 1 s | sim |
+| **reflink** | btrfs, XFS ou APFS | ~40 s | sim |
+| **git clone --reference** | nada | segundos (reaproveita os objetos git do base, sem rede para o histórico) | **não**: instale depois (ou use um template para isso) |
+| **git clone** | nada | depende da rede | não |
+
+A estratégia é escolhida pelo `cloneStrategy` do `config.json` (`auto` por padrão; o `automacli init` pergunta) e pode ser escolhida por clone com `automacli clone … --strategy reflink`; se ela não estiver disponível ou falhar, o automacli cai para a próxima.
+
+Para habilitar o snapshot, converta o repo base uma vez por repositório:
+
+```sh
+automacli base convert minha-org/minha-api
+```
+
+A conversão copia a árvore por reflink para um subvolume novo e troca os dois: não gasta disco, mantém o compartilhamento com as tasks já existentes e leva cerca de um minuto. Não rode com um clone em andamento.
+
+### Snapshots e backups
+
+Um snapshot do `/home` (Timeshift, snapper, `btrfs send`) **não inclui** subvolumes aninhados. Com o repo base convertido e as tasks criadas por snapshot, elas ficam fora desses backups. Para a maioria das pessoas isso é o desejado, já que tasks são descartáveis, mas vale saber.
+
+Ferramentas que param na fronteira do sistema de arquivos (`du -x`, `find -xdev`, `rsync -x`) tratam cada subvolume como outro disco e não entram nele.
+
+## Sistemas operacionais
+
+| | Situação |
+|---|---|
+| **Linux** (qualquer distribuição) | Suportado. Executável, `.deb`, `.rpm` e `PKGBUILD` nos releases. |
+| **macOS** | O código roda (reflink pelo APFS, sem systemd); ainda não há executável nos releases. |
+| **Windows** | Não suportado. |
+
+---
+
+---
+url: https://gustavo210.github.io/automacli-releases/como-funciona.md
+---
+
+# Como funciona
+
+## O problema
+
+Uma stack de desenvolvimento publica portas fixas no host (`3000`, `5432`, `8080`). Duas cópias do mesmo repositório não sobem ao mesmo tempo: a segunda falha com "port is already allocated". Trocar de branch na mesma cópia obriga a parar tudo, reinstalar dependências e regenerar arquivos.
+
+O automacli resolve isso dando a cada branch um diretório e um conjunto de portas próprios.
+
+## Conceitos
+
+| Termo | O que é |
+|---|---|
+| **Task** | Uma cópia do repositório em uma branch, em `<clonePath>/task-<branch>-<owner>-<repo>`. |
+| **Repo base** | Uma task mantida atualizada na branch principal, com dependências instaladas. As outras tasks são copiadas dela. |
+| **Slot** | Um número inteiro por task (1, 2, 3...). Define o deslocamento das portas e o nome do projeto compose. Fica no arquivo `.slot` da task. |
+| **Perfil** | YAML que descreve o repositório: arquivos compose, serviços compartilhados, arquivos a reescrever. |
+| **Serviço compartilhado** | Serviço com uma única instância para todas as tasks (banco, cache). Mantém a porta original. |
+| **Override** | Arquivo compose gerado (`docker-compose.override.yml`) que aplica as portas do slot por cima do compose do repositório. |
+
+## O que acontece em `automacli clone`
+
+```mermaid
+flowchart TD
+    A[automacli clone feat -f org/repo] --> B{Existe repo base<br/>ou aceita criar um?}
+    B -->|sim| C[Atualiza o repo base se preciso e copia:<br/>snapshot btrfs, senão cp --reflink,<br/>senão git clone --reference]
+    B -->|não| D[git clone completo]
+    C --> E[Troca para a branch]
+    D --> E
+    E --> F[Injeta os templates do usuário]
+    F --> G[Carrega o perfil do repositório]
+    G --> H[Reserva o próximo slot livre]
+    H --> I[Gera o override com as portas do slot]
+    I --> I2[Sobe os compartilhados se parados<br/>e cria os volumes externos]
+    I2 --> J[Reescreve portas nos arquivos declarados]
+    J --> K[Grava COMPOSE_PROJECT_NAME, ajusta<br/>Makefile e scripts e grava .slot]
+```
+
+### 1. Cópia
+
+Se já existe uma task do mesmo repositório, o automacli a copia. Com o repo base convertido em subvolume btrfs (`automacli base convert`), a cópia é um snapshot, instantâneo. Senão, é `cp --reflink=always` (`cp -c` no macOS): em Btrfs, XFS e APFS a cópia não ocupa espaço extra até os arquivos divergirem, mas percorre cada arquivo e leva cerca de um minuto em repos grandes. Nos dois casos `node_modules`/`vendor` vêm junto. Sem reflink, ele faz `git clone --reference` apontando para o repo base (histórico sem rede, mas as dependências precisam ser instaladas); sem repo base, `git clone` completo.
+
+A origem preferida é uma task com `-base` no nome (o **repo base**). Se não houver nenhuma task do repositório, o automacli oferece criar `task-base-<owner>-<repo>`. Antes de copiar, ele verifica se o repo base está atrás da branch principal ou sem os artefatos declarados em [`baseRepo`](perfil.md#baserepo) e pergunta se deve atualizar.
+
+### 2. Slot
+
+O slot é o menor inteiro livre, olhando os arquivos `.slot` de todas as tasks em `clonePath`. O slot `0` é especial: mantém as portas e o nome de projeto originais.
+
+### 3. Portas
+
+Para cada porta publicada pela stack:
+
+```text
+porta no slot N = porta original + N × offset        (offset padrão: 100)
+```
+
+| Serviço | Original | Slot 1 | Slot 2 |
+|---|---|---|---|
+| `web` | 3000 | 3100 | 3200 |
+| `api` | 4000 | 4100 | 4200 |
+| `db` (compartilhado) | 5432 | 5432 | 5432 |
+
+Com offset `100`, duas portas originais a uma distância múltipla de 100 colidem em slots diferentes: `8008` e `8808`
+batem nos slots N e N+8, `7001` e `8001` nos slots N e N+10. Por isso o `clone` não pega simplesmente o próximo número
+livre: ele pula qualquer slot cujas portas cairiam em cima das do slot 0 (repo base e stacks temporárias de scripts) ou
+de um slot já alocado. Com `--slot` explícito ele só avisa.
+
+As portas originais vêm de `docker compose config` (que resolve variáveis, `extends` e `include`), com leitura direta dos YAML como alternativa quando o Docker não está disponível. Você pode declarar ou corrigir portas em [`ports`](perfil.md#ports).
+
+### 4. Override
+
+O automacli nunca edita os arquivos compose do repositório. Ele gera um arquivo ao lado:
+
+```yaml
+# Auto-generated by automacli clone (slot 2)
+services:
+  api:
+    ports: !override
+      - '4200:80'
+  db:
+    profiles:
+      - disabled
+  web:
+    ports: !override
+      - '3200:80'
+
+volumes:
+  pgdata:
+    external: true
+    name: minha-api_pgdata
+```
+
+`!override` faz o Compose **substituir** a lista de portas em vez de somar (exige Docker Compose 2.24 ou mais novo; `automacli doctor` confere). O serviço compartilhado `db` sai da stack da task com `profiles: [disabled]`. O Compose carrega `docker-compose.override.yml` sozinho quando você não passa `-f`; se o seu projeto usa `-f` explícito (Makefile, scripts), liste esses arquivos em [`compose.wireInto`](perfil.md#compose) e o automacli acrescenta o override aos comandos.
+
+### 5. Serviços compartilhados
+
+Serviços listados em `shared.services` rodam uma vez só, **a partir do repo base**, no projeto compose do slot 0 (`<projectName>`). Eles não pertencem a nenhuma task: parar, remover ou recriar uma branch nunca derruba o banco das outras.
+
+* Nas tasks, esses serviços entram no override como `profiles: [disabled]`, e cada stack só sobe o que é dela.
+* Um serviço da task que tenha `depends_on` para um compartilhado perde essa dependência no override (`depends_on: !override` com o que sobrar), senão o Compose recusa o projeto por depender de um serviço desligado.
+* Eles mantêm a porta original, e as tasks os acessam pela porta original no host (por exemplo, por uma variável como `HOST_IP` no `.env` do repositório).
+* Os volumes de `shared.volumes` são os do projeto do slot 0 (`<projectName>_<volume>`): mesmos dados para todas as tasks.
+* O `clone` e o `automacli override` sobem a stack compartilhada quando nenhum desses serviços está no ar; se algum ainda roda dentro de uma task, eles não mexem (migre com `automacli shared up`). Sem repo base, só avisam. `automacli shared status|up|down` mostra, inicia (migrando o que estiver rodando dentro de uma task) e para.
+* Um `docker-compose.shared.yml` gerado no repo base dá `restart: unless-stopped` a esses serviços, então o Docker os traz de volta depois de reiniciar a máquina. Com `shared.autostart` (padrão) o [monitor](monitor.md#servicos-compartilhados-sempre-no-ar) cobre o resto: sobe a stack no boot mesmo que ela tenha sido parada, levanta o que cair e recria as filas por slot, que somem quando o ElasticMQ reinicia. `automacli shared down` segura até o próximo boot ou `shared up`.
+
+O comportamento antigo, em que a primeira task a subir hospedava os compartilhados, continua disponível com `shared.host: first-task` no perfil.
+
+Um serviço de **filas** (ElasticMQ) pode ser compartilhado do mesmo jeito, com um detalhe a mais: as tasks não podem
+disputar as mesmas filas. Com `queues.service` em `shared.services`, o `clone` e o `automacli override` criam no
+ElasticMQ as filas do `queues.conf` com um sufixo por slot (`gerar-pagamento-slot4.fifo`), a remoção da task as
+apaga, e o placeholder `{{queueSuffix}}` dos templates diz às aplicações qual sufixo usar. O passo a passo está em
+[Exemplos: um ElasticMQ para todas as tasks](exemplos.md#um-elasticmq-para-todas-as-tasks-filas-por-slot).
+
+### 6. Reescrita de portas em arquivos
+
+O override só muda o lado Docker. URLs e portas escritas em `.env`, `package.json` ou arquivos gerados continuariam apontando para o slot 0. As regras de [`rewrite`](perfil.md#rewrite) dizem quais arquivos atualizar e como. Só as portas de serviços **não** compartilhados são trocadas.
+
+### 7. Nome do projeto compose
+
+Cada slot é um projeto compose separado: `<projectName>-slot<N>`. O automacli grava `COMPOSE_PROJECT_NAME=<projeto>` no `.env` da task (a não ser que o perfil tenha `compose.projectNameEnv: false`), e o Compose passa a usar esse nome sem precisar de `-p`.
+
+## Arquivos gerados em uma task
+
+| Arquivo | Conteúdo |
+|---|---|
+| `.slot` | Slot, branch, projeto compose, owner/repo. |
+| `docker-compose.override.yml` | Portas, serviços desabilitados, volumes compartilhados. |
+| `docker-compose.limits.yml` | Ao lado de cada compose de teste, só com [isolamento](isolamento.md) ligado. |
+| `.env` | Recebe `COMPOSE_PROJECT_NAME`; criado se não existir, e só nesse caso entra no exclude. |
+| `docker-compose.shared.yml` | No repo base, não na task: `restart: unless-stopped` dos serviços compartilhados. |
+
+Todos entram em `.git/info/exclude` da task, junto com os padrões de `gitExclude` do perfil. Nada disso aparece no `git status` nem altera o `.gitignore` do repositório.
+
+## Onde o perfil é procurado
+
+1. `~/.config/automacli/repos/<owner>-<repo>.yml` (do usuário)
+2. `.automacli.yml` (ou `.automacli.yaml`) na raiz do repositório (versionado)
+3. Nenhum arquivo: padrões e descoberta automática
+
+O primeiro encontrado é usado por inteiro; os arquivos não são mesclados. O perfil do usuário vence para que cada pessoa possa ajustar o seu sem alterar o repositório.
+
+O repositório de um diretório é identificado, nesta ordem, pelo `.slot`, pelo remoto `origin` e pelo nome `task-<branch>-<owner>-<repo>`.
+
+---
+
+---
+url: https://gustavo210.github.io/automacli-releases/perfil.md
+---
+
+# Perfil do repositório
+
+O perfil é um arquivo YAML que descreve **um** repositório para o automacli. Todos os campos são opcionais: um perfil vazio já funciona para um projeto com um único `compose.yaml` e nenhum serviço compartilhado.
+
+| Onde fica | Quando usar |
+|---|---|
+| `~/.config/automacli/repos/<owner>-<repo>.yml` | Ajustes seus, que não vão para o repositório. Criado por `automacli init`. |
+| `.automacli.yml` (ou `.automacli.yaml`) na raiz do repositório | Perfil comum ao time, versionado. Criado por `automacli init --local`. |
+
+Se os dois existirem, vale o do usuário. Confira sempre com `automacli profile`, que mostra o arquivo em uso, os valores resolvidos e a tabela de portas.
+
+## Exemplo completo
+
+```yaml
+version: 1
+defaultBranch: main
+
+compose:
+  projectName: minha-api
+  files: [docker-compose.yml]
+  wireInto: [Makefile]
+
+slots:
+  offset: 100
+
+ports:
+  discover: true
+  extra: [5173]
+
+shared:
+  services: [db, redis]
+  volumes: [pgdata]
+
+rewrite:
+  - mode: env
+    files: ['.env', 'apps/*/.env']
+  - mode: cli-flags
+    files: ['apps/*/package.json']
+
+urls:
+  services:
+    api: {port: 4000}
+    web: {port: 3000}
+```
+
+## Referência
+
+### `version`
+
+Versão do formato. Hoje só existe `1`.
+
+### `defaultBranch`
+
+Branch principal do repositório. Usada para criar branches novas e para medir o quanto o repo base está desatualizado. **Padrão:** a branch de `origin/HEAD`; se não houver, `main`.
+
+### `compose`
+
+| Campo | Padrão | Descrição |
+|---|---|---|
+| `projectName` | nome do repositório | Nome do projeto compose do slot 0. Os demais slots usam `<projectName>-slot<N>`. Deve ser o nome com que a sua stack principal roda hoje, se você quer reaproveitar os volumes dela. |
+| `files` | primeiro existente entre `compose.yaml`, `compose.yml`, `docker-compose.yaml`, `docker-compose.yml` | Arquivos compose da stack de desenvolvimento, na ordem em que são passados com `-f`. |
+| `overrideFile` | `docker-compose.override.yml` | Nome do arquivo gerado. |
+| `projectNameEnv` | `true` | Grava `COMPOSE_PROJECT_NAME` no `.env` da task. Desligue se os seus comandos já passam `-p`. |
+| `wireInto` | `[]` | Arquivos (Makefile, scripts) com comandos `docker compose`. Neles o automacli troca `projectName` pelo projeto do slot e acrescenta `-f <overrideFile>` depois do último arquivo de `files`. |
+| `testFile` | — | Nome dos arquivos compose de teste espalhados pelo repo (ex.: `docker-compose.test.yml`). Usado só pelo [isolamento](isolamento.md). |
+| `testBaseFiles` | `[]` | Arquivos compose sempre passados junto com cada `testFile`. |
+
+`wireInto` é necessário quando os comandos usam `-f` explícito, porque nesse caso o Compose não carrega o override sozinho. Exemplo, antes e depois no slot 2:
+
+```make
+# antes
+up:
+	docker compose -p minha-api -f docker-compose.yml up -d
+
+# depois
+up:
+	docker compose -p minha-api-slot2 -f docker-compose.yml -f docker-compose.override.yml up -d
+```
+
+### `slots`
+
+| Campo | Padrão | Descrição |
+|---|---|---|
+| `offset` | `100` | Distância entre as portas de slots consecutivos. Com `100`, cada slot ocupa a "centena" seguinte. |
+
+Escolha um offset maior que a maior distância entre duas portas que não devem colidir. Se a stack publica `8000` e `8100`, com offset `100` o slot 1 colidiria com a porta `8100` do slot 0. O automacli pula sozinho os slots que colidem (e avisa se você forçar `--slot`), mas os números de slot crescem; um offset de `1000` evita o salto.
+
+### `ports`
+
+| Campo | Padrão | Descrição |
+|---|---|---|
+| `discover` | `true` | Lê as portas publicadas dos arquivos em `compose.files`. |
+| `services` | `{}` | Portas declaradas à mão, por serviço, na sintaxe curta do compose: `host:container` ou `host:container/proto`. **Substituem** as descobertas para o mesmo serviço. |
+| `extra` | `[]` | Portas que não estão no compose mas aparecem nos arquivos reescritos, como dev servers rodando no host (`vite` na 5173). |
+
+```yaml
+ports:
+  discover: false          # ignora o compose e usa só a lista abaixo
+  services:
+    web: ['3000:3000']
+    dns: ['53:53/udp', '53:53/tcp']
+  extra: [5173, 9229]
+```
+
+A descoberta usa `docker compose config`, que resolve variáveis, `extends` e `include` e expande faixas (`8000-8010:8000-8010` vira uma porta por valor). Sem Docker, os YAML são lidos diretamente, e aí faixas são ignoradas. Portas sem host fixo (`"3000"` sozinho, que o Docker mapeia para uma porta aleatória) são ignoradas nos dois casos.
+
+### `shared`
+
+| Campo | Padrão | Descrição |
+|---|---|---|
+| `autostart` | `true` | O [monitor](monitor.md#servicos-compartilhados-sempre-no-ar) mantém a stack compartilhada no ar: sobe no boot da máquina, levanta o que cair e recria as filas por slot quando o ElasticMQ reinicia. `automacli shared down` segura até o próximo boot ou `shared up`. Só vale com `host: base`. |
+| `host` | `base` | Onde os compartilhados rodam: `base` (a partir do repo base, independentes das tasks) ou `first-task` (na primeira task que subir; comportamento antigo). |
+| `services` | `[]` | Serviços com uma instância para todos os slots. Mantêm a porta original. Com `host: base`, ficam fora da stack de cada task; com `first-task`, só quando já rodam em outro slot. |
+| `volumes` | `[]` | Volumes nomeados que todos os slots reutilizam. No override viram `external`, com o nome `<projectName>_<volume>`. |
+
+Compartilhe o que é caro de duplicar e seguro de dividir: banco de dados, cache, busca, armazenamento de objetos. **Não** compartilhe o que carrega código da branch (APIs, workers, front-ends).
+
+Todas as tasks enxergam os mesmos dados. Uma migração aplicada em uma branch afeta as outras.
+
+### `services`
+
+Ajustes por serviço escritos no override.
+
+| Campo | Descrição |
+|---|---|
+| `user` | Diretiva `user:` do serviço. Com `${UID}:${GID}`, o automacli acrescenta `UID` e `GID` a cada arquivo de uma regra `rewrite` de modo `env` que ainda não os tenha (inclua o `.env` numa regra `env`). |
+| `tmpfs` | Lista de montagens tmpfs. |
+| `portHost` | Prefixo de host nos binds de porta. `${HOST_IP}` gera `'${HOST_IP}:53:53/udp'`. |
+| `environment` | Variáveis de ambiente acrescentadas ao serviço no override. Nos valores, `{slot}` vira o número do slot, `{composeProject}` o projeto compose da task e `{queueSuffix}` o sufixo das filas de [`queues`](#queues) (vazio no slot 0 ou sem ElasticMQ compartilhado). Serve para passar algo às aplicações sem tocar no compose do repositório. |
+
+```yaml
+services:
+  api:
+    user: '${UID}:${GID}'       # arquivos criados no volume ficam com o seu usuário
+    tmpfs: ['/tmp/cache:mode=1777']
+    environment:
+      SQS_SUFFIX: '{queueSuffix}'   # -slot4 na task, vazio no repo base
+  dns:
+    portHost: '${HOST_IP}'      # só escuta no IP da máquina
+```
+
+Um serviço listado aqui precisa existir nos arquivos compose; o Compose rejeita um override para um serviço sem `image` ou `build`.
+
+### `rewrite`
+
+Lista de regras que atualizam portas em arquivos da task depois do clone. Cada regra tem `files` e `mode`.
+
+Em `files`, `*` casa qualquer trecho dentro de um segmento do caminho: `apps/*/.env`, `*.graphql`. Não existe `**`. Diretórios `node_modules`, `vendor` e `.git` são pulados.
+
+| `mode` | O que troca | Exemplo (slot 1) |
+|---|---|---|
+| `env` | `:PORTA` em URLs e `VAR_PORT=PORTA` | `API_URL=http://localhost:4000` → `:4100` |
+| `cli-flags` | `-p PORTA`, `--port PORTA`, `--listen PORTA` | `"dev": "vite --port 5173"` → `5273` |
+| `urls` | `:PORTA` seguido de `/`, `"` ou `)` | `url: "http://localhost:4000/graphql"` → `:4100` |
+
+Só entram as portas que mudam de slot para slot: as do compose que não são de serviços compartilhados, mais as de `ports.extra`. Linhas de comentário em arquivos `env` não são tocadas.
+
+No modo `env`, uma atribuição simples só é trocada quando o nome da variável é maiúsculo e termina em `PORT` com algum prefixo (`WEB_PORT=3000`, `API_PORT=3000`). `PORT=3000` sozinho, nomes minúsculos e `TIMEOUT=3000` ficam como estão.
+
+### `isolation`
+
+| Campo | Padrão | Descrição |
+|---|---|---|
+| `enabled` | `false` | Coloca os containers de cada slot em um slice systemd `automacli-slot<N>.slice`. |
+| `pidsLimit` | `2048` | Limite de processos por container. |
+
+Veja [Isolamento de recursos](isolamento.md).
+
+### `baseRepo`
+
+Controla a manutenção do repo base.
+
+| Campo | Padrão | Descrição |
+|---|---|---|
+| `artifacts` | `[]` | Arquivos gerados que precisam existir (ex.: schema compilado). Se faltarem, o `clone` oferece regenerar. |
+| `watch` | `[]` | Trechos de caminho. Se a branch principal mudou algum arquivo que os contém, o `clone` lista o arquivo e sugere regenerar. |
+| `regenerate` | `[]` | Comandos de shell executados na raiz do repo base para regenerar os artefatos. |
+| `preserve` | `[node_modules, vendor]` | Caminhos mantidos no `git clean` ao trocar de branch. |
+| `cacheDirs` | `[]` | Diretórios de cache apagados ao atualizar o repo base (e preservados na troca de branch). |
+| `warmup` | `[]` | Comandos de pré-aquecimento executados na raiz do repo base por último (cache de bundler, compilação incremental). Melhor esforço: uma falha fica no histórico, mas não invalida a atualização. |
+| `autoUpdate.enabled` | `false` | O monitor mantém o repo base atualizado sozinho. |
+| `autoUpdate.every` | `1h` | Intervalo entre verificações: `30m` (ou `30min`), `2h`, `1d`. |
+| `autoUpdate.regenerate` | `true` | Roda `regenerate` depois de atualizar. |
+| `autoUpdate.test` | `[]` | Comandos de teste executados na raiz do repo base depois de atualizar e regenerar. |
+| `autoUpdate.warmup` | `true` | Roda `warmup` depois de atualizar, regenerar e testar. |
+| `autoUpdate.notify` | `true` | Aviso de desktop quando o pull, o codegen ou um teste falha. |
+
+```yaml
+baseRepo:
+  artifacts: [packages/schema/dist/schema.graphql]
+  watch: [pnpm-lock.yaml, schema.graphql]
+  regenerate: ['pnpm install', 'pnpm codegen']
+  warmup: ['pnpm --filter web exec expo export --dev --no-minify -p web --output-dir /tmp/warm']
+  autoUpdate:
+    enabled: true
+    every: 2h
+    test: ['pnpm test']
+```
+
+Com `autoUpdate` ligado, o [monitor](monitor.md) verifica a cada `every` se a branch principal avançou. Se avançou, faz `git pull --ff-only`, apaga `cacheDirs`, roda `regenerate` e depois `test`, nessa ordem, parando no primeiro que falhar. Por último roda `warmup`, sem parar em falha.
+
+`warmup` existe porque caches de bundler (Metro, Vite, Turbopack...) são caros de construir a frio e, com `preserve` incluindo `node_modules`, uma task criada por snapshot ou reflink herda o que o repo base já tiver aquecido em `node_modules/.cache`. Assim o custo é pago uma vez, no repo base e em segundo plano, em vez de na primeira vez que cada task sobe. `automacli base warmup` roda só esses comandos, para aquecer na hora ou medir o ganho. Arquivos sobrescritos pelos [templates](instalacao.md#estrutura-do-diretorio-de-configuracao) não contam como alteração local: são restaurados antes do pull e reinjetados depois. Um repo base com outras alterações locais é pulado, e duas atualizações pelo monitor ou por `automacli base update` não se sobrepõem (lock em `.automacli-update.lock`). O resultado fica em `automacli base status` e em `GET /api/base`.
+
+### `commands`
+
+| Campo | Descrição |
+|---|---|
+| `start` | – | Comando de shell que sobe a stack da task (ação "iniciar" do app e da API). Omitido: `docker compose -p <projeto> -f <arquivos do compose> -f <override> up -d`. |
+| `stop` | Comando de shell para parar a stack de uma task **sem** slot (clonada com `--no-slot`). Padrão: `docker compose down --remove-orphans`. |
+
+Tasks com slot são paradas por `docker compose -p <projeto> down --remove-orphans`.
+
+### `gitExclude`
+
+Padrões adicionais para `.git/info/exclude` de cada task com slot (regravados por `automacli override`). Use para arquivos que os seus templates injetam e que não devem aparecer no `git status`.
+
+### `urls`
+
+URLs exibidas pelo [monitor](monitor.md).
+
+| Campo | Padrão | Descrição |
+|---|---|---|
+| `services` | — | Mapa `nome: {port, template}`. `port` é a porta do slot 0: o monitor soma `slot × slots.offset`, salvo para portas de serviços em `shared.services`. `template` aceita `{host}` e `{port}`; padrão `http://{host}:{port}`. |
+| `defaultHost` | `localhost` | Host usado nas URLs. |
+| `hostEnvVar` | — | Variável do `.env` da task que contém o host (ex.: `HOST_IP`), para quem acessa por IP de rede. |
+
+Sem `services`, o monitor gera uma URL por porta publicada de serviço não compartilhado (portas UDP ficam de fora).
+
+## `queues`
+
+Filas SQS da stack, servidas por um ElasticMQ. Serve para duas coisas: o monitor mostrar as filas de cada task
+(`/api/queues`, `get_queues`), e, quando o ElasticMQ é **compartilhado**, cada task ganhar as próprias filas.
+
+| Campo | Padrão | Descrição |
+|---|---|---|
+| `service` | `elasticmq` | Serviço compose que expõe a API SQS. Se a stack não o publica, não há filas. |
+| `port` | `9324` | Porta original (slot 0) da API no host. |
+| `uiPort` | `9325` | Porta original da interface web do ElasticMQ, que o monitor devolve como `ui` em `/api/queues`; `null` se não houver. |
+| `accountPath` | `/000000000000` | Caminho da conta nas URLs das filas. |
+| `conf` | `apps/elasticmq/queues.conf` | Arquivo de filas do ElasticMQ (HOCON): cada bloco de `queues { }` é uma fila; `fifo = true` marca FIFO e ganha `.fifo` no nome. |
+| `suffix` | `-slot{slot}` | Sufixo dos nomes nos slots diferentes de 0; `{slot}` vira o número. |
+
+Com `service` em `shared.services`, há um ElasticMQ só, no repo base, e as filas de uma task são as do `conf` com
+o sufixo no nome: `marketplace-api-slot4`, `gerar-pagamento-slot4.fifo` (o sufixo entra antes de `.fifo`, como o
+Laravel faz com `SQS_SUFFIX`). O `clone` e o `automacli override` criam essas filas pela API; `branches --remove` e
+`remove_task` as apagam. Os apps precisam usar o mesmo sufixo: ponha `SQS_SUFFIX={{queueSuffix}}` no `.env` dos
+[templates](instalacao.md#placeholders-nos-templates), que vira `SQS_SUFFIX=-slot4` na task, `SQS_SUFFIX=` no repo
+base e também vazio enquanto o ElasticMQ não for compartilhado. Sem o serviço em `shared.services`, cada task tem o próprio ElasticMQ com as filas do `conf`, e nada muda.
+
+## Validação
+
+Um perfil inválido interrompe o comando com o campo apontado:
+
+```text
+~/.config/automacli/repos/minha-org-minha-api.yml: perfil inválido:
+  - slots.offset: Invalid input: expected number, received string
+```
+
+Chaves desconhecidas são ignoradas sem aviso, inclusive erros de digitação; confira com `automacli profile` se o valor entrou.
+
+---
+
+---
+url: https://gustavo210.github.io/automacli-releases/exemplos.md
+---
+
+# Exemplos de perfil
+
+## API com banco, sem configuração
+
+Repositório com um `compose.yaml` na raiz:
+
+```yaml
+services:
+  api:
+    build: .
+    ports: ['4000:4000']
+  db:
+    image: postgres:16
+    ports: ['5432:5432']
+    volumes: [pgdata:/var/lib/postgresql/data]
+volumes:
+  pgdata:
+```
+
+Sem perfil nenhum, o automacli descobre as portas e dá a cada task a sua `api` **e o seu `db`**, em portas diferentes (`4100`/`5532`, `4200`/`5632`). Funciona, mas cada task tem um banco vazio.
+
+Para todas as tasks usarem o mesmo banco:
+
+```yaml
+# .automacli.yml
+compose:
+  projectName: minha-api
+shared:
+  services: [db]
+  volumes: [pgdata]
+rewrite:
+  - mode: env
+    files: ['.env']
+```
+
+É, na essência, o que `automacli init` gera para esse repositório: ele ainda acrescenta `version`, `compose.files` e `isolation`, e só inclui `rewrite` se o checkout tiver um `.env`.
+
+## Front-end com dev server no host
+
+O compose só tem a API; o Vite roda fora do Docker, na 5173, com a porta escrita no `package.json`.
+
+```yaml
+compose:
+  projectName: loja
+ports:
+  extra: [5173]              # não está no compose, mas precisa mudar por slot
+rewrite:
+  - mode: cli-flags
+    files: ['package.json']  # "dev": "vite --port 5173"
+  - mode: env
+    files: ['.env']          # VITE_API_URL=http://localhost:4000
+```
+
+## Monorepo com Makefile e vários arquivos compose
+
+```yaml
+version: 1
+
+compose:
+  projectName: plataforma
+  files:
+    - docker-compose.base.yml
+    - docker-compose.development.yml
+  projectNameEnv: false          # o Makefile já passa -p
+  wireInto: [Makefile]
+  testFile: docker-compose.test.yml
+  testBaseFiles: [docker-compose.base.yml]
+
+ports:
+  extra: [7000, 7001, 7002]      # dev servers dos front-ends
+
+shared:
+  services: [database, redis, opensearch, minio]
+  volumes: [database_data, opensearch_data, minio_data]
+
+services:
+  gateway:
+    user: '${UID}:${GID}'
+
+rewrite:
+  - mode: env
+    files: ['.env', 'apps/*/.env']
+  - mode: cli-flags
+    files: ['apps/*/package.json']
+  - mode: urls
+    files: ['apps/gateway/generated/supergraph.graphql']
+
+baseRepo:
+  artifacts: [apps/gateway/generated/supergraph.graphql]
+  watch: [composer.lock, pnpm-lock.yaml, supergraph.graphql]
+  regenerate: ['make codegen']
+  cacheDirs: [.artifact-cache]
+
+isolation:
+  enabled: true
+
+commands:
+  stop: make stop
+
+urls:
+  hostEnvVar: HOST_IP
+  defaultHost: localhost
+  services:
+    gateway: {port: 8004}
+    admin: {port: 7000}
+    loja: {port: 7001, template: 'http://loja.devtest:{port}'}
+```
+
+## Lista de portas mantida à mão
+
+Quando o compose usa recursos que a descoberta não cobre, ou você quer controle total:
+
+```yaml
+ports:
+  discover: false
+  services:
+    proxy: ['8080:8080', '8443:8443']
+    api: ['8008:80']
+    dns: ['53:53/udp', '53:53/tcp']
+shared:
+  services: [dns]
+services:
+  dns:
+    portHost: '${HOST_IP}'
+```
+
+## Regenerar o override ao subir a stack
+
+Para que os serviços compartilhados sejam avaliados sempre no momento da subida, chame `automacli override` antes do `up`:
+
+```make
+up:
+	@automacli override --quiet
+	docker compose up -d
+```
+
+## Um ElasticMQ para todas as tasks (filas por slot)
+
+Cada task com o próprio ElasticMQ custa memória à toa, e duas stacks com filas de mesmo nome só não se atrapalham
+porque são instâncias separadas. Dá para ter um ElasticMQ só, compartilhado como o banco, desde que cada task use
+as filas com um sufixo no nome. Três partes participam: o perfil, os templates e as aplicações.
+
+**1. Perfil:** ponha o serviço em `shared.services` e descreva as filas em [`queues`](perfil.md#queues). Os padrões
+servem para o ElasticMQ comum (API na 9324, interface na 9325, conta `000000000000`):
+
+```yaml
+ports:
+  services:
+    elasticmq: ['9325:9325', '9324:9324']
+shared:
+  services: [database, redis, elasticmq]
+queues:
+  service: elasticmq
+  conf: apps/elasticmq/queues.conf   # as filas do slot 0, no formato do ElasticMQ
+  suffix: '-slot{slot}'              # gerar-pagamento.fifo → gerar-pagamento-slot4.fifo
+```
+
+A partir daí o `clone` e o `automacli override` criam as filas do `conf` com o sufixo do slot pela API do ElasticMQ
+(idempotente), `branches --remove` e `remove_task` as apagam, e o monitor mostra as de cada task em `/api/queues`
+e `get_queues`. Suba o serviço uma vez com `automacli shared up`.
+
+**2. Templates:** as aplicações precisam saber o sufixo. O placeholder `{{queueSuffix}}` vira `-slot4` na task,
+vazio no repo base, e também vazio enquanto o ElasticMQ não estiver em `shared.services` (assim o mesmo template
+serve nos dois modos). No `.env.template`:
+
+```ini
+ELASTICMQ_ENDPOINT=http://${HOST_IP}:9324/000000000000/
+SQS_SUFFIX={{queueSuffix}}
+```
+
+Num arquivo que liste URLs completas de fila, o sufixo entra antes de `.fifo`:
+
+```php
+'GERAR_PAGAMENTO' => 'http://192.168.0.188:9324/000000000000/gerar-pagamento{{queueSuffix}}.fifo',
+```
+
+**3. Aplicações:** no Laravel, a conexão `sqs` aceita `suffix`, que ele põe antes de `.fifo`, exatamente como o
+automacli nomeia as filas:
+
+```php
+'sqs' => [
+    'driver' => 'sqs',
+    'prefix' => env('AWS_PREFIX'),
+    'queue' => env('SQS_QUEUE', 'default'),
+    'suffix' => env('SQS_SUFFIX'),
+],
+```
+
+e a variável precisa chegar ao container. Sem mexer no compose do repositório, o override faz isso por serviço,
+com o valor já resolvido para o slot:
+
+```yaml
+services:
+  api:
+    environment: {SQS_SUFFIX: '{queueSuffix}'}
+  api-queue-worker:
+    environment: {SQS_SUFFIX: '{queueSuffix}'}
+```
+
+(ou, se o repositório quiser conhecer a variável, `SQS_SUFFIX: ${SQS_SUFFIX-}` no compose de desenvolvimento, com o
+padrão vazio para produção).
+
+Tasks criadas antes da mudança continuam com o ElasticMQ próprio até o override delas ser regenerado. Para migrar
+uma: no `.env`, volte a porta do ElasticMQ para a original e defina `SQS_SUFFIX=-slot<N>`; depois
+`automacli override --dir <task>` e reinicie a stack.
+
+---
+
+---
+url: https://gustavo210.github.io/automacli-releases/comandos.md
+---
+
+# Comandos
+
+Todo comando aceita `--help`.
+
+## Tasks
+
+### `automacli init [DIR]`
+
+Cria o perfil de um repositório a partir dos seus arquivos compose. Rode dentro de um checkout do repositório.
+
+| Flag | Descrição |
+|---|---|
+| `--local` | Grava `.automacli.yml` na raiz do repositório em vez de `~/.config/automacli/repos/`. |
+| `-y`, `--yes` | Aceita as sugestões sem perguntar. |
+| `--force` | Sobrescreve um perfil existente. |
+| `-g`, `--global` | Só a configuração da máquina, sem perfil de repositório. |
+
+Enquanto o `config.json` não tiver token do GitHub (ou com `--global`), o `init` abre um assistente para a configuração da máquina: diretório das tasks, token do GitHub, estratégia de clone (entre as que a máquina suporta) e notificações. Grava em `~/.config/automacli/config.json`.
+
+Para o repositório, o `init` pergunta quais arquivos compose formam a stack, quais serviços são compartilhados (pré-seleciona bancos, caches e filas pela imagem ou pelo nome do serviço) e, no Linux, se o isolamento por systemd deve ser ligado. Inclui `.env` em `rewrite` quando existe e `Makefile` em `compose.wireInto` quando ele existe e chama `docker compose`.
+
+### `automacli doctor`
+
+Mostra o que a máquina oferece (git, Docker e Compose; btrfs, reflink, systemd, journal, notificações, clipboard) e qual estratégia de clone será usada. Veja [Requisitos e ambiente](requisitos.md).
+
+| Flag | Descrição |
+|---|---|
+| `-r`, `--repo` | `owner/repo`: avalia a estratégia com o repo base desse repositório. |
+| `-j`, `--json` | Saída em JSON. |
+
+### `automacli base convert OWNER/REPO`
+
+Converte o repo base em subvolume btrfs, para que os próximos clones usem snapshot (instantâneo). Aceita também um caminho. Não gasta disco e mantém o compartilhamento com as tasks existentes; leva cerca de um minuto. `-y`, `--yes` pula a confirmação.
+
+### `automacli base update [OWNER/REPO]`
+
+Atualiza o repo base agora: `git pull --ff-only` da branch principal quando ela avançou, depois `baseRepo.regenerate` (se `autoUpdate.regenerate`), `baseRepo.autoUpdate.test` e, por último, `baseRepo.warmup` (se `autoUpdate.warmup`). `--force` regenera e testa mesmo sem commits novos. Sai com erro se um passo obrigatório falhar, mostrando as últimas linhas da saída; uma falha no pré-aquecimento só é registrada. Não mexe num repo base com alterações locais fora dos templates, nem num que outro processo esteja atualizando (`.automacli-update.lock` com menos de 2 h); nesses casos só avisa.
+
+### `automacli base warmup [OWNER/REPO]`
+
+Roda só os comandos de `baseRepo.warmup` no repo base, sem pull, regeneração nem testes. Serve para aquecer caches na hora (depois de ligar o perfil) e para medir quanto tempo o pré-aquecimento leva. Sai com erro se algum comando falhar.
+
+### `automacli base status`
+
+Últimas 5 atualizações (automáticas e manuais) de cada repo base: quando, quantos commits, quantos passos, duração e em qual comando falhou.
+
+### `automacli profile`
+
+Mostra o perfil em vigor: de qual arquivo veio, os valores resolvidos e a tabela de portas.
+
+| Flag | Descrição |
+|---|---|
+| `-d`, `--dir` | Diretório do repositório ou da task. Padrão: diretório atual. |
+| `-s`, `--slot` | Slot usado na tabela de portas. Padrão: o do `.slot`, senão 1. |
+
+```text
+$ automacli profile --slot 2
+Repositório: minha-org/minha-api
+Perfil:      /home/voce/.config/automacli/repos/minha-org-minha-api.yml
+Projeto:     minha-api-slot2 (slot 2)
+...
+SERVIÇO  ORIGINAL  SLOT 2
+api      4000      4200
+db       5432      5432  (compartilhado)
+```
+
+### `automacli clone BRANCH -f OWNER/REPO`
+
+Cria uma task para a branch. Se a branch não existe no remoto, é criada localmente a partir da branch principal.
+
+| Flag | Descrição |
+|---|---|
+| `-f`, `--filter` | Repositório no formato `owner/repo`. Obrigatório. |
+| `-d`, `--directory` | Diretório onde criar a task. Padrão: `clonePath` da configuração. |
+| `-s`, `--slot` | Força um número de slot. `0` mantém portas e projeto originais. |
+| `--no-slot` | Não isola: sem override, sem reescrita, sem `.slot`. |
+| `--strategy` | `auto`, `snapshot`, `reflink`, `git-reference` ou `git`. Padrão: `cloneStrategy` do config. Veja [como as tasks são criadas](requisitos.md#como-as-tasks-sao-criadas). |
+| `--no-reflink` | Atalho para `--strategy git`. |
+| `--base-update` | O que fazer com um repo base atrasado, sem perguntar: `regen` (pull e regenerar artefatos), `pull` (só o `git pull`) ou `skip` (usar como está). |
+| `--create-base` / `--no-create-base` | Criar ou não o repo base quando ele não existe, sem perguntar. Sem base, o clone é por `git`. |
+| `--replace` | Se a task já existe, apaga e recria sem perguntar. |
+| `-y`, `--yes` | Sem prompts, com as respostas padrão: `--base-update regen` e `--create-base`. Não apaga task existente; para isso, `--replace`. |
+| `--json` | Sem prompts; o progresso vai para o stderr e o stdout recebe só um JSON com o resultado. |
+
+#### Sem terminal: delegar o clone a uma IA ou a um script
+
+O clone tem três perguntas: repo base atrasado, repo base inexistente e task já existente. Cada uma tem uma flag que a
+responde. Sem terminal (stdin não é um TTY), ou com `--yes` ou `--json`, nada é perguntado: um repo base atrasado é
+usado como está (ou atualizado, com `--yes`), um repo base inexistente é criado, e uma task existente dá erro em vez de
+ser apagada, a menos que `--replace` esteja presente.
+
+```sh
+automacli clone minha-feature -f minha-org/minha-api --json --base-update regen
+```
+
+```json
+{
+  "ok": true,
+  "branch": "minha-feature",
+  "owner": "minha-org",
+  "repo": "minha-api",
+  "directory": "/home/voce/tasks/task-minha-feature-minha-org-minha-api",
+  "strategy": "snapshot",
+  "slot": 3,
+  "composeProjectName": "minha-api-slot3",
+  "ports": {"api": [4300], "web": [3300]},
+  "sharedServices": ["db", "redis"],
+  "baseRepo": {"path": "/home/voce/tasks/task-base-minha-org-minha-api", "behindBefore": 12, "action": "regen", "update": "updated"}
+}
+```
+
+`baseRepo.update` é o status da atualização (`updated`, `up-to-date`, `failed`, `skipped-dirty`, `locked`) ou `null`
+quando não houve. Em erro, o stdout recebe `{"ok": false, "error": "..."}` e o código de saída é 1.
+
+Ao final, `cd <diretório da task>` vai para a área de transferência (`wl-copy`, `xclip`, `xsel`, `pbcopy` ou `clip.exe`, o que existir); sem nenhum deles, o comando é só impresso.
+
+O passo a passo está em [Como funciona](como-funciona.md).
+
+### `automacli override`
+
+Regenera o override da task atual com o estado de agora e, com ElasticMQ compartilhado, garante as filas do slot ([`queues`](perfil.md#queues)). Com `shared.host: base` (padrão), os serviços compartilhados ficam fora da stack e, se nenhum estiver no ar, o comando sobe a stack compartilhada a partir do repo base; com `shared.host: first-task`, eles só são desabilitados quando outra task já os roda. Rode antes de subir a stack.
+
+| Flag | Descrição |
+|---|---|
+| `-d`, `--dir` | Diretório da task. Padrão: diretório atual. |
+| `-q`, `--quiet` | Sem saída em caso de sucesso, para uso em Makefiles. |
+
+Em um diretório sem `.slot` não faz nada.
+
+### `automacli shared up|status|down`
+
+Serviços compartilhados (banco, cache, DNS, filas) rodando a partir do repo base. `status` mostra onde cada um está, se o autostart está ligado e quantas filas por slot faltam no ElasticMQ compartilhado; `up` sobe o que falta, move para o repo base o que estiver rodando dentro de uma task e recria as filas por slot de todas as tasks; `down` para todos (pede confirmação).
+
+| Flag | Descrição |
+|---|---|
+| `-r`, `--repo` | `owner/repo`. Padrão: o do diretório atual. |
+| `-a`, `--all` | Todos os repositórios com repo base em `clonePath`, de qualquer diretório. |
+| `-y`, `--yes` | Não pede confirmação no `down`. |
+
+Com o [monitor](monitor.md#servicos-compartilhados-sempre-no-ar) rodando e `shared.autostart` ligado (padrão), a stack sobe sozinha no boot e volta se cair; `down` grava um marcador no repo base para o monitor não subi-la de novo até o próximo boot ou `shared up`. Para forçar de qualquer lugar:
+
+```sh
+automacli shared up --all       # sobe tudo e recria as filas por slot
+automacli shared down --all -y  # para tudo até o próximo boot ou "shared up"
+```
+
+O `branches` recusa remover o repo base enquanto ele hospedar os compartilhados.
+
+### `automacli monitor pair [nome]`
+
+Pareia um telefone com o monitor: gera um token, grava em `monitor.devices` do `config.json` e mostra um QR code que o app do automacli abre. Repetir o nome troca o token.
+
+| Flag | Descrição |
+|---|---|
+| `--read-only` | O aparelho só lê; sem a flag ele pode parar e iniciar stacks e compartilhados. |
+| `--list` | Lista os aparelhos com escopo, último acesso, IP e conexões abertas (consulta o monitor em `127.0.0.1`). |
+| `--disable <nome>` / `--enable <nome>` | Desativa (o token para de valer e as conexões caem) ou reativa um aparelho. |
+| `--revoke <nome>` | Remove um aparelho; o token deixa de valer assim que o monitor relê o `config.json`. |
+| `--host` | IP ou nome da máquina a colocar no link. Padrão: o primeiro IPv4 da rede local. |
+| `-p`, `--port` | Porta do monitor (padrão 7777). |
+| `--no-qr` | Só imprime o link, sem o QR code. |
+
+Detalhes em [Monitor → Acesso do telefone](monitor.md#acesso-do-telefone).
+
+### `automacli branches`
+
+Lista as tasks com tamanho e data, em uma interface interativa que permite renomear e remover.
+
+| Flag | Descrição |
+|---|---|
+| `--no-tui` | Imprime uma tabela em vez da interface interativa. |
+| `-s`, `--sort` | `date` (padrão), `size` ou `name`. |
+| `-d`, `--remove` | Remove a task com esse nome de diretório, ou um trecho que case com um único diretório. |
+| `-r`, `--rename` com `-t`, `--to` | Renomeia uma task (mesma regra de nome ou trecho). Para a stack antes. |
+| `-y`, `--yes` | Não pede confirmação no `--remove`. É o que o painel e scripts usam. |
+
+Remover uma task para a stack dela antes (`docker compose -p <projeto> down`), apaga as filas do slot num ElasticMQ compartilhado ([`queues`](perfil.md#queues)), retoma a posse de arquivos criados por containers e apaga o diretório. Em btrfs com `user_subvol_rm_allowed`, um snapshot some na hora; senão, a task é movida para `<clonePath>/.lixeira/` (um rename, instantâneo) e apagada em segundo plano, então o slot fica livre na hora e o disco volta em alguns minutos. Restos de uma remoção interrompida por reinício são apagados na próxima.
+
+### `automacli oom`
+
+Lista os serviços e processos das tasks que foram mortos por falta de memória, lendo o journal do sistema. Sem `journalctl`, usa o `OOMKilled` que o Docker registra, sem motivo nem slice.
+
+| Flag | Descrição |
+|---|---|
+| `--since` | Período: `30min`, `2h`, `7d`, `today` ou uma data. Padrão: `24h`. |
+| `-s`, `--slot` | Só as mortes de um slot. |
+| `-j`, `--json` | Saída em JSON. |
+
+```text
+$ automacli oom --since 3h --slot 4
+QUANDO                O QUÊ                       CAUSA   MOTIVO
+05/10/2026, 17:56:57  marketplace-front (slot 4)  oomd    memory pressure for /automacli.slice being 83.39% > 60.00% for > 10s
+05/10/2026, 17:57:26  necso-front (slot 4)        oomd    memory pressure for /automacli.slice/automacli-slot4.slice being 62.69% > 60.00% for > 10s
+
+2 morte(s). Mais afetados:
+    1×  marketplace-front (slot 4)
+    1×  necso-front (slot 4)
+```
+
+A coluna **CAUSA** diz quem matou: `oomd` é o systemd-oomd reagindo à pressão de memória no slice; `kernel` é o OOM killer do kernel: o teto `MemoryMax` de um slice ou a memória da máquina esgotada. O **MOTIVO** mostra qual slice estourou: o do slot ou o global `automacli.slice` (todas as stacks juntas). Detalhes em [Isolamento de recursos](isolamento.md#saber-o-que-foi-morto).
+
+## Monitor
+
+### `automacli monitor`
+
+Sobe o servidor de monitoramento. Veja [Monitor](monitor.md).
+
+| Flag | Descrição |
+|---|---|
+| `-p`, `--port` | Porta HTTP. Padrão: `7777`. |
+| `--http-only` | Só o servidor HTTP, sem a dica sobre o MCP. É o que o serviço systemd usa. |
+| `--watch` / `--no-watch` | Recarrega `config.json`, `repos/*.yml` e `templates/` quando mudam. Ligado por padrão. |
+| `--notify` / `--no-notify` | Liga ou desliga as notificações de desktop, vencendo o `notifications` do `config.json`. |
+| `--mcp-only` | Só o servidor MCP, por stdio. |
+| `--no-notify` | Desliga a notificação de desktop quando um serviço é morto por falta de memória. |
+
+### `automacli mcp setup|config|status [CLIENTE]`
+
+Liga o MCP do monitor a um assistente de IA. Clientes: `claude-code`, `codex`, `gemini`, `cursor`, `windsurf`,
+`vscode`, `claude-desktop` ou `all` (todos os encontrados na máquina). Veja [MCP para agentes de IA](mcp.md).
+
+| Ação | O que faz |
+|---|---|
+| `setup [CLIENTE]` | Registra o servidor pela CLI do cliente quando existe (`claude mcp add` etc.), senão grava o arquivo de configuração dele, preservando outros servidores. Sem cliente, pergunta entre os instalados. |
+| `config [CLIENTE]` | Imprime o trecho para colar: JSON de `mcpServers` (padrão), TOML para `codex`, JSON de `servers` para `vscode`. |
+| `status` | Para cada cliente: ligado, instalado sem o MCP, ou não encontrado. |
+
+| Flag | Descrição |
+|---|---|
+| `--dry-run` | Mostra o comando que rodaria ou o arquivo que gravaria, sem fazer nada. |
+| `--file` | Grava no arquivo de configuração mesmo quando o cliente tem CLI. |
+
+### `automacli monitor setup`
+
+Instala o monitor como serviço systemd do usuário, iniciado no login.
+
+| Flag | Descrição |
+|---|---|
+| `-p`, `--port` | Porta HTTP. Padrão: `7777`. |
+| `--status` | Mostra o estado do serviço. |
+| `--remove` | Remove o serviço. |
+
+## Utilitários
+
+### `automacli update`
+
+Atualiza o próprio automacli para a última release, respeitando o versionamento semântico: correções (`patch`) e
+novidades compatíveis (`minor`) são aplicadas; um salto de versão maior (`major`), que pode trazer mudanças
+incompatíveis, só com `--major`.
+
+| Flag | Descrição |
+|---|---|
+| `-c`, `--check` | Só verifica: diz se há versão nova e de que tipo, sem instalar. |
+| `--major` | Permite atualizar para uma versão maior. |
+| `--json` | Resultado em JSON: `current`, `latest`, `diff`, `newer`, `installMethod`, `action`, `command`. |
+
+O que o comando faz depende de como esta cópia foi instalada:
+
+| Instalação | O que acontece |
+|---|---|
+| Executável do instalador (`~/.local/share/automacli`) | Baixa o tarball da versão nova, confere o SHA-256 pelo `SHA256SUMS` do release e troca o diretório de uma vez, como o `install.sh`. |
+| Pacote da distribuição (`/opt/automacli`) | Mostra o comando do gerenciador (`apt`, `dnf`, `zypper` ou `yay`), que é quem deve atualizar. |
+| Código-fonte | Mostra `git pull && pnpm install && pnpm build`. |
+
+Além do comando, qualquer execução no terminal avisa, no máximo uma vez por dia, quando existe versão nova (a consulta
+fica em cache em `~/.cache/automacli/update-check.json`). O aviso não aparece com `--json`, fora de um terminal, no
+monitor, nem com `AUTOMACLI_NO_UPDATE_CHECK=1`.
+
+### `automacli outdated`
+
+Procura pacotes npm desatualizados no diretório atual.
+
+| Flag | Descrição |
+|---|---|
+| `-d`, `--directory` | Diretório a examinar. |
+| `-f`, `--filter` | Regex de nomes de pacote (ex.: `^@minha-org`). Padrão: `packageFilter` da configuração. |
+| `--no-dev` | Ignora `devDependencies`. |
+| `-j`, `--json` | Saída em JSON. |
+
+### `automacli cleanup`
+
+Apaga diretórios descartáveis (`node_modules`, `dist`, `coverage`...) a partir do diretório atual.
+
+| Flag | Descrição |
+|---|---|
+| `-p`, `--patterns` | Nomes de diretório a apagar, separados por espaço. |
+| `-s`, `--save <padrões>` | Só grava os padrões em `~/.cleanup_patterns`, usados nas próximas execuções, e sai sem apagar nada. Não combina com `-p` nem com `--verdaccio*`. |
+| `-i`, `--interactive` / `--no-interactive` | Pergunta antes de apagar. Ligado por padrão; `--no-interactive` exige `-p`. |
+| `--verdaccioAll` | Apaga todo o armazenamento do Verdaccio (`verdaccioStoragePath`). |
+| `--verdaccioScope` | Apaga só os pacotes de um escopo, ex.: `@minha-org`. Faz `sudo chown` do armazenamento antes de apagar. |
+| `-v`, `--verbose` | Mostra no spinner o diretório sendo removido. |
+
+### `automacli setup [BRANCH]`
+
+Faz `stash`, troca para a branch principal, `pull` e `stash apply` no repositório atual; com `BRANCH`, repete para essa branch. Com `all`, faz o mesmo em todos os repositórios de `setup.repos` da [configuração global](instalacao.md#configuracao-global).
+
+A branch principal é a de `origin/HEAD` (senão `main`), salvo quando o caminho contém uma chave de `setup.branchOverrides`.
+
+---
+
+---
+url: https://gustavo210.github.io/automacli-releases/monitor.md
+---
+
+# Monitor
+
+O monitor é um servidor local que reúne o estado de todas as tasks: git, pull request, containers, uso de CPU e memória. Ele expõe os dados por HTTP (para painéis e aplicativos) e por MCP (para agentes de IA).
+
+```sh
+automacli monitor                 # http://localhost:7777
+automacli monitor setup           # instala como serviço e inicia no login
+```
+
+::: warning Atenção
+A API **não tem autenticação** e aceita requisições de qualquer origem (CORS aberto). Deixe-a acessível só em redes em que você confia, ou atrás de uma VPN como Tailscale ou WireGuard.
+:::
+
+## O que é coletado
+
+| Dado | Fonte | Atualização |
+|---|---|---|
+| Arquivos não commitados, branch publicada e commits atrás do remoto | `git status`, `ls-remote` e `fetch` na task (o nome da branch vem do diretório) | 60 s |
+| Containers em execução | `docker compose -p <projeto> ps` | 15 s |
+| Pull request, revisões e checks | API do GitHub (precisa de `githubToken`) | 5 min |
+| Tamanho aparente | `du` | 5 min |
+| Uso real de disco (só btrfs) | `btrfs filesystem du` | 30 min, em segundo plano |
+| CPU e memória por serviço | `docker stats`, agrupado pelos labels do Compose | 5 s, últimos 5 min |
+| URLs dos serviços | [`urls`](perfil.md#urls) do perfil | a cada consulta |
+| Mortes por falta de memória | journal do sistema (systemd-oomd e kernel), só nos cgroups do automacli; sem `journalctl`, o `OOMKilled` registrado pelo Docker | 30 s |
+| Atualização dos repos base | `git fetch`, `pull`, codegen e testes do perfil | `baseRepo.autoUpdate.every` de cada repositório |
+
+As estatísticas cobrem qualquer projeto compose em execução na máquina, não só as tasks.
+
+## Disco: aparente e real
+
+Com reflink, as tasks compartilham blocos com o repo base. Ferramentas como `du` não sabem disso e contam cada arquivo inteiro, então dez tasks de 9 GB parecem ocupar 90 GB quando ocupam uma fração. O monitor informa os dois números:
+
+| Campo | O que é |
+|---|---|
+| `apparentBytes` | Soma do tamanho dos arquivos, como `du` mostra. É quanto ocuparia **sem** o btrfs. |
+| `exclusiveBytes` | Blocos que só aquela task usa. É o que volta para o disco ao apagá-la. |
+| `total.realBytes` | Ocupação de verdade do diretório das tasks: o exclusivo de todas, mais o compartilhado contado uma vez. |
+| `total.savedBytes` | Economia do reflink: aparente − real. |
+| `total.sharedBytes` | Blocos compartilhados entre tasks, contados uma vez. |
+
+Cada task traz `storage: {apparentBytes, exclusiveBytes}`, e a resposta de `/api/branches` traz `storage: {measuredAt, measuring, supported, total}` com o resumo. `/api/storage` devolve o relatório inteiro: `{durationMs, measuredAt, measuring, supported, tasks: {<diretório>: {apparentBytes, exclusiveBytes}}, total}`. O campo `sizeBytes` continua sendo o tamanho aparente.
+
+A medição lê os extents de todos os arquivos e leva alguns minutos de CPU, por isso roda em segundo plano com prioridade mínima, no máximo a cada 30 minutos e só quando alguém consulta a API. Até a primeira terminar, `storage` vem `null`. Fora de btrfs não há dado de compartilhamento: `supported` vem `false` e vale só o `sizeBytes`.
+
+## API HTTP
+
+| Método | Rota | Resposta |
+|---|---|---|
+| `GET` | `/api/health` | `{status, uptimeMs, configLoadedAt}` |
+| `GET` | `/api/branches` | Todas as tasks. |
+| `GET` | `/api/branches/:dirName` | Uma task, pelo nome do diretório. `404` se não existir. |
+| `GET` | `/api/branches/:dirName/changes` | Commits, arquivos e não commitado da task em relação à principal, mais o `lifecycle`. |
+| `GET` | `/api/overview` | Resumo: repositórios, repo base, slots, compartilhados, tasks por ciclo de vida, disco. |
+| `GET` | `/api/summary` | Resumo compacto para o telefone: containers no ar e com problema, stacks, tasks (slot, containers, CPU e memória da última amostra, disco real e aparente, URLs, PR com review e checks, arquivos não commitados, `canDelete`), compartilhados, OOM em 24 h, disco real total e espaço. Veja [Acesso do telefone](#acesso-do-telefone). |
+| `GET` | `/api/devices` | Aparelhos pareados: escopo, desativado, último acesso, IP, pedidos e conexões abertas. |
+| `GET` | `/api/events?since=` | Resumo e alertas em Server-Sent Events. `since` (ou o cabeçalho `Last-Event-ID`) reenvia o que o cliente perdeu; veja [Eventos](#eventos). |
+| `GET` | `/api/shared` | Serviços compartilhados de cada repositório e onde rodam. |
+| `GET` | `/api/diagnose?task=` | Achados do diagnóstico, com severidade e correção; `task` filtra. |
+| `GET` | `/api/queues?task=` | Filas SQS por task: nome, `visible` (aguardando consumidor), `inFlight` (em processamento), `delayed` e `state`, mais `endpoint` da API e `ui` (interface web do ElasticMQ); com ElasticMQ compartilhado, separadas por slot pelo sufixo. `task` filtra. |
+| `GET` | `/api/stats` | Histórico de CPU/memória de cada projeto compose. |
+| `GET` | `/api/stats/:project` | Histórico de um projeto. |
+| `GET` | `/api/stats/:project/services` | Histórico por serviço de um projeto. |
+| `GET` | `/api/stats/:project/stream` | O mesmo, em Server-Sent Events a cada 5 s. |
+| `GET` | `/api/oom?since=24h` | Serviços e processos mortos por falta de memória no período. |
+| `GET` | `/api/base` | Histórico das atualizações dos repos base (status, commits, passos e saída). |
+| `GET` | `/api/storage` | Uso real de disco: total e por task. `null` até a primeira medição terminar. |
+| `POST` | `/api/storage/refresh` | Dispara uma nova medição de disco (ignorado se já houver uma em andamento). |
+| `POST` | `/api/cache/invalidate` | Descarta os caches de git, containers, PR, OOM e `du` (não a medição de disco real) e força nova coleta. |
+| `GET` | `/dashboard/:project` | Página HTML com gráficos ao vivo do projeto. |
+
+As rotas `GET /api/*` de dados respondem `{data, timestamp}`. `/api/health` responde `{status, uptimeMs, configLoadedAt}`, os `POST` respondem `{message}` e um caminho inexistente responde `{error}` com 404. O stream SSE envia o array de serviços direto, sem envelope.
+
+### Formato de uma task
+
+```json
+{
+  "dirName": "task-minha-feature-minha-org-minha-api",
+  "directory": "/home/voce/tasks/task-minha-feature-minha-org-minha-api",
+  "branch": "minha-feature",
+  "owner": "minha-org",
+  "repo": "minha-api",
+  "uncommittedFiles": 2,
+  "pushedToRemote": true,
+  "behindRemoteCount": 0,
+  "sizeBytes": 734003200,
+  "storage": {"apparentBytes": 734003200, "exclusiveBytes": 52428800},
+  "slot": {"slot": 2, "composeProjectName": "minha-api-slot2", "createdAt": "2026-10-05T12:00:00.000Z"},
+  "stackRunning": true,
+  "runningContainers": ["api", "web"],
+  "unhealthyContainers": [{"service": "worker", "state": "exited:137"}],
+  "urls": {"api": "http://localhost:4200", "web": "http://localhost:3200"},
+  "changes": {"baseBranch": "main", "aheadOfBase": 3, "behindBase": 0, "mergedIntoBase": false, "remoteBranchExists": true, "unpushedCommits": 0, "changedFilesCount": 7, "lastCommitAt": "2026-10-05T11:50:00.000Z"},
+  "lifecycle": {"state": "in-review", "canDelete": false, "reasons": ["PR #128 aprovado, aguardando merge"], "blockers": ["2 arquivo(s) não commitado(s)"], "warnings": ["stack no ar: será parada ao apagar"], "wouldFree": {"slot": 2, "exclusiveBytes": 52428800}},
+  "pr": {
+    "number": 128,
+    "title": "Minha feature",
+    "url": "https://github.com/minha-org/minha-api/pull/128",
+    "state": "approved",
+    "reviewState": "approved",
+    "reviewCount": 1,
+    "mergeable": true,
+    "mergeableState": "clean",
+    "checks": [{"name": "ci", "state": "success"}]
+  },
+  "oomKills": [],
+  "lastScannedAt": "2026-10-05T12:34:56.000Z"
+}
+```
+
+`oomKills` traz as mortes por falta de memória no slot da task nas últimas 24 horas, no formato abaixo. `changes` resume a diferença em relação à branch principal e `lifecycle` diz em que ponto a task está e se pode ser apagada; os dois estão explicados em [MCP para agentes de IA](mcp.md#ciclo-de-vida-de-uma-task). `unhealthyContainers` lista serviços em `restarting` ou parados com erro.
+
+### Formato de uma morte por falta de memória
+
+```json
+{
+  "at": "2026-10-05T20:57:26.998Z",
+  "kind": "oomd",
+  "slot": 4,
+  "service": "web",
+  "composeProject": "minha-api-slot4",
+  "container": "minha-api-slot4-web-1",
+  "containerId": "71e074b70d13...",
+  "process": null,
+  "unit": "docker-71e074b70d13....scope",
+  "cgroup": "/automacli.slice/automacli-slot4.slice/docker-71e074b70d13....scope",
+  "reason": "memory pressure for /automacli.slice/automacli-slot4.slice being 62.69% > 60.00% for > 10s"
+}
+```
+
+`kind` é `oomd` (pressão de memória no slice) ou `kernel` (OOM do kernel: teto `MemoryMax` do slice ou memória do sistema esgotada; `process` traz o nome do processo quando lido do journal). `service`, `composeProject` e `container` são `null` para processos do host e para containers removidos antes de o monitor os ter visto.
+
+`pr.state` é `draft`, `merged`, `closed`, `approved` (aberto e aprovado) ou `open`; `reviewState` é `approved`, `changes_requested`, `pending` ou `none`; `checks[].state` é `success`, `failure`, `error` ou `pending`.
+
+`slot` e `urls` são `null` em tasks clonadas com `--no-slot` (nelas `stackRunning` é `false` e `runningContainers` é `[]`); `urls` também é `null` quando o perfil da task é inválido. `pr` é `null` sem token ou sem pull request.
+
+### Formato das estatísticas
+
+`/api/stats` devolve `[{composeProjectName, history}]`; `/api/stats/:project` devolve só o `history` do projeto; `/api/stats/:project/services` e o `/stream` devolvem um item por serviço, do mais pesado para o mais leve:
+
+```json
+[
+  {
+    "service": "api",
+    "history": [{"cpuPercent": 3.2, "memoryMb": 412, "timestamp": "2026-10-05T12:34:50.000Z"}]
+  }
+]
+```
+
+`history` guarda até 60 amostras, uma a cada 5 segundos.
+
+## Acesso do telefone
+
+O monitor escuta em todas as interfaces, mas só a própria máquina usa a API sem autenticação (painel, CLI, `curl` local), seja por `localhost`, seja por um IP dela mesma, como o painel Quickshell faz. De fora, cada pedido precisa do token de um aparelho pareado. Sem nenhum aparelho pareado, pedidos de fora recebem `401`.
+
+```sh
+automacli monitor pair s24              # token com controle (parar e iniciar stacks) e QR code
+automacli monitor pair tablet --read-only
+automacli monitor pair --list           # último acesso, IP e conexões abertas de cada aparelho
+automacli monitor pair --disable s24    # o token para de valer e as conexões caem; --enable reativa
+automacli monitor pair --revoke s24
+```
+
+Cada aparelho tem um **escopo**: `control` (padrão ao parear) pode chamar as ações abaixo; `read` só lê (`POST` responde `403`). Aparelhos pareados antes de existir escopo contam como `read`: pareie de novo para ganhar controle. `--disable` mantém o aparelho no `config.json` mas recusa o token e fecha as conexões de eventos dele na hora; `--revoke` apaga. `GET /api/devices` lista os aparelhos com último acesso, IP, quantidade de pedidos e conexões abertas (o token nunca sai da máquina; só os últimos 6 caracteres).
+
+| Método | Rota | Ação |
+|---|---|---|
+| `POST` | `/api/tasks/:dirName/stack/stop` | Para a stack da task (recusa se ela hospeda os compartilhados). |
+| `POST` | `/api/tasks/:dirName/stack/start` | Sobe a stack: `commands.start` do perfil ou `docker compose -p <projeto> -f <arquivos> -f <override> up -d` dentro da task. |
+| `POST` | `/api/tasks/:dirName/remove` | Apaga a task como `automacli branches --remove`: só quando o ciclo de vida diz que pode (`canDelete`); sem `force`. |
+| `POST` | `/api/shared/:owner/:repo/up` | Sobe (ou migra para o repo base) os compartilhados. |
+| `POST` | `/api/shared/:owner/:repo/down` | Para os compartilhados; o monitor só os sobe de novo no próximo boot ou com `shared up`. |
+
+As ações respondem `{data: {ok, message, steps}}` com `200` quando fizeram e `409` quando se recusaram (motivo em `message`); task inexistente é `404`. Da própria máquina não precisam de token.
+
+O QR code é um link `automacli://pair?url=…&token=…&name=…` que o app do automacli abre ao ser lido pela câmera. O token vai em `Authorization: Bearer <token>` ou, para um `EventSource` de navegador, em `?token=`. Os aparelhos ficam em `monitor.devices` do `config.json`; parear e revogar valem assim que o monitor relê o arquivo, sem reiniciar. Não há TLS: o acesso é pensado para a rede local (o app só conecta quando está no mesmo Wi‑Fi do PC).
+
+## Eventos
+
+`GET /api/events` mantém a conexão aberta e manda um evento por linha `data:`, com `id` igual ao número de sequência e `event` igual ao tipo. Ao conectar, o cliente recebe o último resumo; com `since=<id>` (ou `Last-Event-ID`) recebe também o que perdeu enquanto esteve fora. O monitor guarda os últimos 500 eventos; se o cliente perdeu mais do que isso, chega um `event: reset` e ele deve recarregar o estado por `/api/summary`. Um comentário `: ping` a cada 20 s mantém a conexão viva.
+
+| Tipo | Nível | Quando |
+|---|---|---|
+| `summary` | info | O resumo mudou (container subiu ou caiu, stack parou, compartilhado voltou...) ou passaram 2 min desde o último, para CPU e memória seguirem atuais. `data` traz o resumo inteiro. |
+| `container-unhealthy` / `container-recovered` | error / info | Um container entrou em `restarting` ou parou com erro, e quando voltou. |
+| `shared-stopped` / `shared-recovered` | error / info | Um serviço compartilhado parou, e quando voltou. |
+| `space-low` / `space-recovered` | warn ou error / info | Espaço não alocado do btrfs baixo ou crítico. |
+| `oom` | error | Serviço morto por falta de memória (o mesmo que gera a notificação de desktop). |
+| `base-update-failed` | warn | A atualização automática do repo base falhou. |
+
+Cada evento tem `key`, que identifica a condição (ex.: `unhealthy:<task>:<serviço>`): o alerta e a recuperação compartilham a mesma `key`, para o cliente apagar a notificação quando o problema some. O observador roda a cada 30 s; o que já estava quebrado quando o monitor iniciou não gera alerta de novo, só aparece no resumo.
+
+## Repos base atualizados sozinhos
+
+Com `baseRepo.autoUpdate.enabled: true` no perfil, o monitor verifica no intervalo configurado se a branch principal avançou e, se avançou, atualiza o repo base, regenera os artefatos, roda os testes declarados e, por fim, o `warmup`. Um repo base com alterações locais não é tocado. Assim o próximo `clone` já parte de um base pronto, sem o prompt de atualização. Falhas no pull, no codegen ou nos testes geram notificação de desktop (`autoUpdate.notify`, ligado por padrão) e aparecem em `automacli base status`. Detalhes em [Perfil → baseRepo](perfil.md#baserepo).
+
+## Serviços compartilhados sempre no ar
+
+Com `shared.autostart: true` no perfil (padrão) e `shared.host: base`, o monitor mantém a stack compartilhada de cada repo base no ar:
+
+* **No boot**: o serviço systemd inicia o monitor, que espera o Docker responder e então sobe os compartilhados que não voltaram sozinhos. Um `automacli shared down` anterior deixa de valer, como o `unless-stopped` do Docker.
+* **A cada minuto**: sobe o que estiver parado (OOM, `make stop` no repo base, Docker reiniciado), a não ser que tenha sido parado de propósito com `automacli shared down`, que grava `.automacli-shared-stopped` no repo base. `automacli shared up` apaga o marcador.
+* **Filas por slot**: as filas `*-slotN` vivem na memória do ElasticMQ e somem quando o container reinicia, e a task passa a receber `QueueDoesNotExist`. O monitor compara as filas esperadas de cada task com as que existem e recria as que faltam.
+
+Para desligar num repositório, `shared.autostart: false` no perfil; vale assim que o arquivo é salvo. As ações aparecem no log com o prefixo `[shared owner/repo]`:
+
+```sh
+journalctl --user -u automacli-monitor -f | grep '\[shared'
+```
+
+## Notificações
+
+Com o monitor em execução, cada serviço morto por falta de memória gera uma notificação de desktop (`notify-send`) em até 30 segundos, com o nome do serviço, o slot e o motivo. A mesma linha vai para o log do serviço:
+
+```sh
+journalctl --user -u automacli-monitor -f | grep '\[oom\]'
+```
+
+Só são notificadas as mortes que acontecem depois de o monitor iniciar. Para desligar, inicie com `--no-notify` ou defina `"notifications": false` no `config.json`, o que vale também para o serviço systemd, sem reiniciar.
+
+## MCP
+
+`automacli monitor --mcp-only` fala MCP por stdio e dá a um agente de IA o contexto do que o automacli gerencia:
+tasks com ciclo de vida (pode apagar?), mudanças em relação ao repo base, disco real × aparente, serviços
+compartilhados e um diagnóstico com correções. Ferramentas, estados e exemplos em [MCP para agentes de IA](mcp.md).
+
+## Serviço systemd
+
+`automacli monitor setup` cria `~/.config/systemd/user/automacli-monitor.service`, habilita o serviço e liga o *linger* do usuário, para ele rodar sem sessão aberta.
+
+```sh
+automacli monitor setup --status
+journalctl --user -u automacli-monitor -f
+systemctl --user restart automacli-monitor     # depois de atualizar o automacli
+```
+
+---
+
+---
+url: https://gustavo210.github.io/automacli-releases/app.md
+---
+# App para o telefone (Android)
+
+Um app leve para acompanhar o monitor do automacli pelo celular, **só quando o telefone está no mesmo Wi‑Fi do PC**: widget na tela inicial com os containers no ar, notificação quando um serviço falha e, no Android 16+ (One UI 8+), os containers em execução no Now Bar como Live Update. Nada passa pela nuvem; fora da rede do PC o app não usa rede nem bateria.
+
+## Instalar
+
+1. Baixe o APK: [app-latest em automacli-releases](https://github.com/Gustavo210/automacli-releases/releases/tag/app-latest) (link fixo, atualizado a cada merge na `main` que toque em `android/`). Também fica como artefato de cada execução do workflow *App Android*.
+2. Instale pelo navegador do telefone (permita instalar de fontes desconhecidas para o navegador).
+3. No PC, com o monitor rodando como serviço (`automacli monitor setup`), pareie:
+
+```sh
+automacli monitor pair s24
+```
+
+4. Aponte a câmera do telefone para o QR code. O app abre, guarda a URL e o token (só de leitura) e já conecta. Sem QR code, preencha a URL (`http://<ip-do-pc>:7777`) e o token à mão na tela de configurações.
+
+## O que ele faz
+
+| Recurso | Como funciona |
+|---|---|
+| **Tela principal** | O mesmo formato do painel do PC: disco real, aparente e economia do reflink no topo, busca, e um card por task com slot (`UP S35` quando no ar), disco real e aparente, arquivos não commitados, estado do PR, chips de review e checks, gráfico de CPU e memória ao vivo (a cada 5 s com a tela aberta) e os botões **PR**, **Links**, **Recursos** e **Remover** (só quando o ciclo de vida permite; o motivo aparece embaixo). |
+| **Widget** | Três tamanhos: pequeno (containers, stacks, disco real e aparente), médio (mais duas tasks) e grande (até sete tasks com a situação: mergeada, pronta para merge, checks, review; atalho `#PR` que abre o GitHub e botão *recursos* que abre o app na task). Cores do tema do aparelho. Fora da rede mostra o último estado com a idade. |
+| **Modo apresentação** | Botão *Apresentar*: tela preta pura para o AMOLED, brilho reduzido, sempre ligada, retrato ou paisagem. O conteúdo é o gráfico de CPU e memória de cada stack no ar ocupando a tela (lado a lado em paisagem, em faixas em retrato), com os valores atuais em números grandes, lido a cada 5 s; as tasks paradas viram só uma contagem. Contra burn‑in, o conteúdo desloca alguns pixels a cada minuto e o relógio muda de canto; sem animações, só recompõe quando chega evento. Toque para sair. |
+| **Notificação fixa** | Exigência do Android para a conexão ficar aberta, e útil: "48 containers em 2 stacks" ou "Fora da rede do PC". |
+| **Now Bar / Live Update** | No Android 16+ a notificação fixa pede para ser promovida: aparece no Now Bar do One UI com uma barra verde (no ar) e vermelha (com problema). Precisa permitir "notificações ao vivo" para o app nos ajustes do Android. Pode ser desligado no app. |
+| **Alertas** | Container em restart ou parado com erro, serviço compartilhado parado, disco btrfs baixo, serviço morto por falta de memória, falha na atualização do repo base. A notificação some sozinha quando o monitor avisa que resolveu. |
+| **Catch‑up** | Ao voltar para a rede, o app pede ao monitor o que perdeu desde o último evento; alertas de quando você estava fora chegam nessa hora. |
+| **Recursos** | Memória e CPU por stack (soma do `docker stats`) na lista, e por serviço ao tocar na task; disco real em btrfs por task e no total, com o que o reflink poupa. |
+| **Links** | Ao tocar na task, todas as URLs dela abrem no navegador do telefone. Nomes como `*.devtest` só resolvem se o DNS do Wi‑Fi do telefone apontar para o PC (o `dnsmasq` compartilhado atende na porta 53). |
+| **Ações** | Parar ou iniciar a stack de uma task e subir ou parar os serviços compartilhados, com confirmação. Exige aparelho pareado com escopo `control` (padrão de `automacli monitor pair`); com `--read-only` os botões respondem que o aparelho só lê. |
+| **Atualização** | Em Configurações, *Verificar atualização* consulta a release `app-latest` no GitHub (única coisa que usa internet), baixa o APK e abre o instalador. Só atualiza por cima se o APK do CI estiver assinado com a mesma chave (`setup-signing.sh`). |
+
+## Como ele se conecta
+
+O app observa o Wi‑Fi. Em qualquer rede nova, tenta o monitor por 3 segundos; se responde, abre o fluxo de eventos ([`/api/events`](monitor.md#eventos)) e fica nele; se não responde, é outra rede, e ele tenta de novo a cada minuto sem alarde. O tráfego é amarrado à interface Wi‑Fi, então funciona mesmo quando o Wi‑Fi não tem internet e o Android preferiria o 4G. O token é só de leitura ([Acesso do telefone](monitor.md#acesso-do-telefone)).
+
+## Aparelhos pareados
+
+`automacli monitor pair --list` mostra cada aparelho com escopo, último acesso, IP e quantas conexões de eventos estão abertas agora. `--disable <nome>` corta o acesso na hora (as conexões caem e o token é recusado) sem apagar o pareamento; `--enable` reativa; `--revoke` apaga. Detalhes em [Monitor → Acesso do telefone](monitor.md#acesso-do-telefone).
+
+## Samsung (One UI)
+
+* Em **Ajustes > Apps > automacli > Bateria**, escolha *Sem restrições* e tire o app da lista de *apps que dormem*; senão o One UI encerra a conexão depois de alguns dias.
+* O app usa dois caminhos para o Now Bar ao mesmo tempo: o Live Update do Android 16 e o que os apps parceiros do Samsung usam (extras `android.ongoingActivityNoti.*` com o `meta-data` `com.samsung.android.support.ongoing_activity`, como o Samsung Health). Em Config há ainda o toggle *Estilo nativo Samsung*, que troca o Live Update pelo estilo oculto `OngoingActivityStyle` do Gravador de Voz; nenhum dos dois é API pública, então o diagnóstico mostra o que o aparelho aceitou.
+* Para o Now Bar, dois ajustes: **Ajustes > Notificações > Configurações avançadas > Notificações ao vivo** e permita o automacli; e, como o Now Bar só mostra apps parceiros por padrão, ligue **Opções do desenvolvedor > Notificações ao vivo para todos os apps**. O app tem um diagnóstico em Config (permissão, elegibilidade e se a notificação foi promovida).
+* Depois de reiniciar o telefone, o app volta sozinho se estava ligado.
+
+## Compilar
+
+O projeto fica em `android/` (Kotlin, Jetpack Compose, Glance, OkHttp; sem Firebase). Fora do pacote npm. Com o SDK do Android instalado:
+
+```sh
+cd android
+./gradlew :app:assembleDebug      # app/build/outputs/apk/debug/app-debug.apk
+./gradlew :app:assembleRelease    # minificado (~4 MB); sem chave, assinado com a de debug
+```
+
+O workflow `.github/workflows/android.yml` compila em todo push ou PR que toque `android/` e, na `main`, publica a release rolante `app-latest`. Para o APK do CI atualizar por cima do instalado, a chave precisa ser sempre a mesma: rode uma vez `android/scripts/setup-signing.sh`, que cria `~/.config/automacli/app-release.jks` e grava os secrets `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS` e `ANDROID_KEY_PASSWORD` no repositório. Guarde o `.jks` e o `.env` ao lado: perdê-los obriga a trocar de chave e reinstalar.
+
+---
+
+---
+url: https://gustavo210.github.io/automacli-releases/mcp.md
+---
+
+# MCP para agentes de IA
+
+O monitor do automacli fala [MCP](https://modelcontextprotocol.io) (Model Context Protocol). Ligado a um assistente
+como Claude Code, Cursor ou Codex, ele dá ao modelo o contexto do que está rodando na máquina: quais branches estão
+clonadas, em que slot, se a stack está no ar, se o PR foi mesclado, o que cada task mudou em relação ao repo base,
+quanto disco ela ocupa de verdade e se os serviços compartilhados estão de pé. Com isso o agente consegue responder
+"posso apagar essa task?", liberar slots, e diagnosticar e corrigir problemas sem que você precise traduzir o estado
+da máquina para ele.
+
+## Ligar em um comando
+
+Um comando por cliente. Ele usa a CLI do cliente quando existe (`claude mcp add`, `codex mcp add`, `gemini mcp add`,
+`code --add-mcp`) e, nos outros, grava o arquivo de configuração sem mexer no que já está lá:
+
+::: code-group
+
+```sh [Claude Code]
+automacli mcp setup claude-code
+```
+
+```sh [Codex CLI]
+automacli mcp setup codex
+```
+
+```sh [Gemini CLI]
+automacli mcp setup gemini
+```
+
+```sh [Cursor]
+automacli mcp setup cursor
+```
+
+```sh [Windsurf]
+automacli mcp setup windsurf
+```
+
+```sh [VS Code]
+automacli mcp setup vscode
+```
+
+```sh [Claude Desktop]
+automacli mcp setup claude-desktop
+```
+
+```sh [Todos]
+automacli mcp setup all        # todos os clientes encontrados na máquina
+```
+
+:::
+
+Depois, reinicie o cliente (ou a sessão) e pergunte: "o que o automacli está gerenciando?".
+
+```sh
+automacli mcp setup            # sem argumento: escolhe entre os clientes instalados
+automacli mcp status           # onde já está ligado
+automacli mcp setup cursor --dry-run   # mostra o que faria, sem gravar
+```
+
+### À mão
+
+O servidor é `automacli monitor --mcp-only`, por stdio. `automacli mcp config` imprime o trecho pronto para colar
+(`automacli mcp config codex` no formato TOML do Codex, `automacli mcp config vscode` no formato do VS Code):
+
+```json
+{
+  "mcpServers": {
+    "automacli": {"command": "automacli", "args": ["monitor", "--mcp-only"]}
+  }
+}
+```
+
+O `setup` nunca depende do `PATH`, porque clientes gráficos como Cursor e Claude Desktop, e o Claude Code aberto por
+eles, não herdam o `PATH` do seu shell. Instalado pelo release, ele grava o caminho absoluto do executável
+(`~/.local/share/automacli/bin/automacli` ou `/opt/automacli/bin/automacli`), que traz o próprio Node. Rodando do
+código-fonte (`npm link`), grava o Node em uso e o `bin/run.js` absolutos.
+
+O servidor usa o mesmo `config.json` e os mesmos perfis do resto do automacli. O token do GitHub é opcional, mas sem
+ele o ciclo de vida não enxerga PRs e só reconhece uma task como terminada quando todos os commits dela já estão na
+branch principal.
+
+::: tip Instruções embutidas
+O servidor envia ao cliente, no handshake, um texto de instruções com os conceitos (task, slot, repo base, ciclo de
+vida, disco real × aparente), a ordem recomendada de uso e a regra principal: **toda tarefa nova começa com
+`create_task`**. Quando você pede "começa a tarefa X" ou "implementa Y na branch Z", o agente cria a task dessa branch
+antes de tocar em código, e nunca desenvolve no repo base nem na task de outra branch. A maioria dos clientes mostra
+as instruções ao modelo automaticamente; você não precisa explicar o automacli no seu prompt.
+:::
+
+## O que o agente passa a saber
+
+| Pergunta | De onde vem a resposta |
+|---|---|
+| Quais branches estão clonadas e em que slot? | `list_tasks`: uma entrada por diretório `task-*`, com `slot`, `pr`, `stack` |
+| Quais estão rodando agora? | `list_tasks` com `filter: running` (containers via `docker compose ps`) |
+| Quais já foram mescladas ou fechadas? | `lifecycle.state` de cada task: `merged`, `closed`, `abandoned` |
+| Posso apagar esta task para liberar o slot? | `lifecycle.canDelete`, com `blockers` (o que impede) e `warnings` |
+| O que ela mudou em relação ao repo base? | `get_task_changes`: commits só dela, arquivos tocados, não commitado, não enviado |
+| Quanto disco ela ocupa de verdade? | `storage.exclusiveBytes` (o que apagar devolve) × `apparentBytes` (o que `du` mostra) |
+| Os serviços compartilhados estão de pé? | `get_shared_services`: cada serviço e o projeto compose onde roda |
+| O repo base está atualizado? | `get_base_repos`: commits atrás da principal, alterações locais, última atualização |
+| O que está errado e como resolver? | `diagnose`: achados com severidade e comando (ou ferramenta MCP) de correção |
+| Cria uma task para esta branch? | `create_task`: o `automacli clone` sem prompts, devolvendo diretório, slot e portas |
+
+## Ciclo de vida de uma task
+
+Cada task recebe um `lifecycle` calculado cruzando o PR no GitHub com o git local:
+
+| `state` | Quando | Pode apagar? |
+|---|---|---|
+| `base` | É o repo base (`task-base-<owner>-<repo>`), origem das outras tasks e host dos compartilhados. | Nunca. |
+| `merged` | PR mesclado, ou, sem PR, todos os commits da task já estão na branch principal. | Sim, se não houver bloqueio. |
+| `closed` | PR fechado sem merge. | Sim, com aviso para confirmar que o trabalho não volta. |
+| `abandoned` | Nunca teve PR nem branch remota, e o último commit tem mais de 30 dias. | Não: os commits só existem nessa máquina. |
+| `in-review` | PR aberto, em rascunho ou aprovado aguardando merge. | Não. |
+| `in-progress` | Sem PR; branch enviada ou com commits locais. | Não. |
+| `unknown` | Sem dados do git (diretório sem repositório, por exemplo). | Não. |
+
+`canDelete` só é `true` quando o estado é `merged`, `closed` ou `abandoned` **e** não há bloqueio. São bloqueios:
+arquivos não commitados, commits não enviados para a branch remota e commits que não estão nem na principal nem no
+remoto. Avisos (`warnings`) não impedem: stack no ar (será parada ao apagar), PR fechado sem merge.
+
+`wouldFree` diz o que apagar libera: o número do slot e os bytes exclusivos da task, quando o disco já foi medido.
+
+::: warning O PR vence o git
+Um PR mesclado por squash deixa a branch com commits que não são ancestrais da principal, então o git sozinho diria
+"não mesclada". Por isso o estado vem do PR quando há token, e o git é o critério só sem PR. Sem token, uma task
+mesclada por squash fica em `in-progress` até você apagá-la à mão: é o lado conservador.
+:::
+
+## Ferramentas
+
+### Leitura
+
+| Ferramenta | Parâmetros | O que devolve |
+|---|---|---|
+| `get_overview` | — | Repositórios, repo base, slots em uso, serviços compartilhados, tasks por estado, quais podem ser apagadas, disco real × aparente. Comece por aqui. |
+| `list_tasks` | `filter`: `all`, `running`, `finished`, `deletable`, `in-progress`, `in-review`, `base`; `repo`: `owner/repo` | Uma entrada por task: slot, `lifecycle` com resumo em uma linha, PR com checks, containers (inclusive os com problema), mudanças em relação à principal, disco, URLs. |
+| `get_task` | `task`: diretório, branch ou trecho único | O mesmo de `list_tasks` para uma task, mais as mortes por memória das últimas 24 h. |
+| `get_task_changes` | `task`; `includeFiles` (padrão `true`) | `commits` (até 50), `changedFiles` (até 200), `uncommitted`, `unpushedCommits`, `aheadOfBase`, `behindBase`, `mergedIntoBase`, mais o `lifecycle`. |
+| `get_shared_services` | — | Por repositório: cada serviço compartilhado e o projeto compose onde roda; `healthy: false` quando parado ou rodando dentro de uma task. |
+| `get_storage` | — | Relatório do btrfs: totais aparente, exclusivo, real, economia do reflink, e por task o `exclusiveBytes`, ordenado do maior. Fora de btrfs, só o aparente. |
+| `get_base_repos` | — | Repo base de cada repositório: branch principal, commits atrás do remoto, alterações locais, `autoUpdate` do perfil, resultado da última atualização. |
+| `diagnose` | `task` (opcional) | Achados ordenados por severidade, cada um com `code`, `message` e `fix` (comando ou ferramenta). |
+| `get_queues` | `task` (opcional) | Filas SQS de cada task, com nome e estado (`waiting`, `processing`, `delayed`, `idle`), os três contadores e a URL da interface web do ElasticMQ (`ui`). Com ElasticMQ compartilhado, cada slot vê só as suas, pelo sufixo. |
+| `get_oom_kills` | `since` (padrão `24h`) | Serviços e processos mortos por falta de memória, como `automacli oom`. |
+
+### Ação
+
+| Ferramenta | Parâmetros | O que faz |
+|---|---|---|
+| `create_task` | `branch`, `repo`: `owner/repo`; opcionais `baseUpdate` (`skip`, `pull`, `regen`), `slot`, `strategy`, `replace` | `automacli clone` sem prompts: cria a task por snapshot do repo base, aloca o slot, gera o override e injeta os templates. Devolve o JSON do clone (diretório, slot, portas, estratégia, repo base) e as últimas linhas do progresso. |
+| `update_base_repo` | `repo`; `force` | `automacli base update` em segundo plano: pull, regenerar artefatos, testes e pré-aquecimento do perfil. Devolve na hora o arquivo de log; o resultado aparece em `get_base_repos.lastUpdate`. |
+| `start_shared_services` | `repo`: `owner/repo` | `automacli shared up`: sobe os compartilhados no repo base, migrando os que rodam dentro de uma task. |
+| `stop_task_stack` | `task` | `docker compose down` da task, mantendo o diretório. Recusa no repo base que hospeda os compartilhados. |
+| `remove_task` | `task`; `force` (padrão `false`) | `automacli branches --remove`: para a stack, retoma a posse dos arquivos e apaga o diretório (snapshot na hora, ou lixeira com remoção em segundo plano). Só aceita `lifecycle.canDelete: true`; `force` ignora os bloqueios. Nunca apaga o repo base. |
+| `refresh` | — | Descarta os caches e inicia nova medição de disco. |
+
+`get_branches_status` e `get_branch_detail`, da primeira versão, continuam existindo e devolvem os campos brutos.
+
+Cada ação devolve `{ok, message, steps}`. Quando recusa, `message` explica o motivo e o que fazer antes.
+
+## Diagnóstico
+
+`diagnose` procura, nesta ordem de severidade:
+
+| `code` | Severidade | O que significa | `fix` |
+|---|---|---|---|
+| `shared-stopped` | erro | Serviço compartilhado parado; as tasks não conectam. | `automacli shared up` / `start_shared_services` |
+| `shared-no-base` | erro | O repositório usa compartilhados e não há repo base para hospedá-los. | `automacli clone … -f owner/repo` (oferece criar o base) |
+| `containers-unhealthy` | erro | Container da task em `restarting` ou parado com erro. | `docker compose -p <projeto> logs --tail 50 <serviço>` |
+| `shared-in-task` | aviso | Compartilhado rodando dentro de uma task; parar essa task derruba o das outras. | `automacli shared up` (migra) |
+| `base-behind` | aviso | Repo base atrás da principal; tasks novas nascem desatualizadas. | `automacli base update` |
+| `base-dirty` | aviso | Repo base com alterações locais; a atualização automática o pula. | `git status` no repo base |
+| `slot-port-collision` | aviso | Dois slots publicam portas iguais; as stacks não sobem juntas. | reclonar uma das tasks |
+| `oom-kills` | aviso | Mortes por falta de memória no slot nas últimas 24 h. | `automacli oom --slot N` |
+| `task-finished-blocked` | aviso | Task terminada, mas com trabalho não commitado ou não enviado. | `git status` na task |
+| `task-finished` | info | Task terminada e sem bloqueio: pode ser apagada. | `automacli branches --remove` / `remove_task` |
+| `finished-stack-running` | info | Task terminada com a stack no ar gastando recurso. | `docker compose down` / `stop_task_stack` |
+| `task-far-behind` | info | Task mais de 50 commits atrás da principal. | `git rebase origin/<principal>` |
+| `no-base-repo` | info | Repositório sem repo base: clones completos, sem dependências prontas. | `automacli clone … -f owner/repo` |
+| `storage-freeable` | info | Quanto disco real as tasks terminadas liberariam. | — |
+
+## Um diálogo típico
+
+> **Pessoa:** tem task que eu já posso apagar?
+>
+> **Agente** chama `get_overview`, vê `tasks.deletable: ["task-feat-login-owner-api"]`, chama `get_task` para
+> confirmar `lifecycle`: `merged (pode apagar): PR #312 mesclado; branch remota já apagada`, sem bloqueios, e
+> responde: "A `feat-login` foi mesclada no PR #312 e não tem nada local. Apagar libera o slot 3 e 1,2 GB. Apago?"
+>
+> **Pessoa:** apaga.
+>
+> **Agente** chama `remove_task` com `task: "feat-login"` e relata os passos: stack parada, posse retomada,
+> subvolume apagado.
+
+Para uma task que não terminou, `remove_task` recusa e explica. O agente só deve usar `force: true` depois de você
+confirmar que o trabalho pode ser perdido; as instruções embutidas dizem isso a ele.
+
+## Criar tasks pela IA
+
+`create_task` é o `automacli clone` chamado pelo MCP: a IA informa a branch e o `owner/repo`, e recebe o diretório,
+o slot, as portas por serviço e a estratégia usada. Por baixo, o servidor roda o próprio automacli como subprocesso
+com `--json` e as flags sem prompt, então o comportamento é idêntico ao do terminal: perfil, templates, lixeira,
+tudo igual.
+
+> **Pessoa:** cria uma task para a branch `feat/pagamentos` do `minha-org/minha-api`.
+>
+> **Agente** chama `get_base_repos`, vê o repo base 40 commits atrás, chama `update_base_repo` e avisa: "o repo base
+> está atualizando em segundo plano; crio a task agora a partir dele como está, ou espero?" Depois chama
+> `create_task` com `branch: "feat/pagamentos"` e responde com o diretório e as portas.
+
+Duas regras que as instruções embutidas já dão ao agente:
+
+* Um repo base atrasado é usado como está (`baseUpdate: skip`, o padrão). `regen` dentro do `create_task` funciona,
+  mas pode levar minutos e estourar o timeout do cliente MCP; por isso existe `update_base_repo`, que roda solto.
+* Uma task que já existe dá erro, nunca é apagada; `replace: true` só depois de a pessoa confirmar.
+
+Sem MCP, o mesmo é possível pelo terminal, com as flags do clone:
+[Comandos › clone](comandos.md#sem-terminal-delegar-o-clone-a-uma-ia-ou-a-um-script).
+
+## HTTP
+
+Tudo que o MCP responde também existe na [API HTTP](monitor.md#api-http) do monitor: `GET /api/overview`,
+`GET /api/branches/:dirName/changes`, `GET /api/shared`, `GET /api/diagnose?task=…`, e `lifecycle`, `changes` e
+`unhealthyContainers` em cada task de `GET /api/branches`. As ações ficam só no MCP e no terminal.
+
+## Segurança
+
+O servidor MCP roda por stdio, no seu usuário, só para o cliente que o iniciou. As ações fazem o mesmo que os
+comandos do terminal e respeitam os mesmos limites: nunca apagam o repo base, nunca param os compartilhados por
+uma task, e `remove_task` sem `force` só apaga o que o ciclo de vida liberou. Mesmo assim, configure o cliente para
+pedir confirmação nas ferramentas de ação.
+
+---
+
+---
+url: https://gustavo210.github.io/automacli-releases/isolamento.md
+---
+
+# Isolamento de recursos
+
+Opcional. Disponível em Linux com systemd e Docker usando o driver de cgroup `systemd`.
+
+Com várias stacks no ar, um teste descontrolado em uma task pode consumir toda a memória e travar a máquina. Com o isolamento ligado, tudo o que uma task roda entra em um slice systemd próprio, `automacli-slot<N>.slice`, com limite de memória e peso de CPU reduzido (`CPUWeight=50`: a task perde a disputa de CPU para o desktop, sem teto fixo). Quem estoura o limite de memória é morto dentro do slice, e o resto da máquina segue respondendo.
+
+## Ligar
+
+No perfil do repositório:
+
+```yaml
+isolation:
+  enabled: true
+  pidsLimit: 2048
+```
+
+E, uma vez por máquina, instale os slices e os limites a partir do repositório do automacli:
+
+```sh
+sudo bash scripts/install-system-limits.sh   # slices, systemd-oomd, sysctl e daemon.json do Docker
+bash scripts/install-user-limits.sh          # slices da sessão do usuário
+sudo systemctl restart docker                # quando for conveniente
+```
+
+::: warning Atenção
+`install-system-limits.sh` altera `/etc/docker/daemon.json` (define `cgroup-parent`, `live-restore` e, se ainda não houver, `default-address-pools`; guarda um backup em `daemon.json.bak-automacli`) e o primeiro restart do Docker derruba os containers em execução. Leia o script antes de rodar.
+:::
+
+Sem os slices instalados, o `cgroup_parent` ainda agrupa os containers por slot, mas **sem limite de memória nem de CPU**; só o `pids_limit` por container, aplicado pelo Docker, continua valendo.
+
+## Como cada coisa entra no slice
+
+| O que roda | Como entra | Onde ficam os limites |
+|---|---|---|
+| Containers da stack | `cgroup_parent` no override | `/etc/systemd/system/automacli-.slice.d/` |
+| Containers de teste | `cgroup_parent` em `docker-compose.limits.yml`, ao lado de cada `compose.testFile` | idem |
+| Outros containers | `cgroup-parent: automacli.slice` no `daemon.json` | `/etc/systemd/system/automacli.slice` (teto global) |
+| Processos do host | `systemd-run --user --scope --slice=automacli-slot<N>.slice` | `~/.config/systemd/user/automacli-.slice.d/` |
+
+O automacli decide **onde** cada processo roda. **Quanto** ele pode usar fica na pasta `system/` do repositório, nunca no código: tetos globais nos arquivos `.slice`, limites por slot nos `.conf`.
+
+### Arquivos de teste
+
+O Compose rejeita um override que mencione um serviço ausente dos arquivos passados com `-f`. Por isso os testes não podem reaproveitar o override da stack: para cada arquivo com o nome de `compose.testFile`, o automacli grava ao lado um `docker-compose.limits.yml` com os serviços daquele teste e os de `compose.testBaseFiles`. Inclua-o no comando de teste:
+
+```sh
+docker compose -f docker-compose.base.yml \
+  -f apps/api/docker-compose.test.yml \
+  -f apps/api/docker-compose.limits.yml run --rm api
+```
+
+### Processos do host
+
+Para `pnpm`, `jest` e afins rodando fora do Docker, use um wrapper nos seus [templates](instalacao.md#estrutura-do-diretorio-de-configuracao):
+
+```sh
+#!/bin/bash
+# scripts/isolate.sh — uso: scripts/isolate.sh pnpm test
+SLOT=$(grep -oE '"slot":[[:space:]]*[0-9]+' .slot | grep -oE '[0-9]+$' || echo 0)
+exec systemd-run --user --quiet --scope --slice="automacli-slot${SLOT}.slice" -- "$@"
+```
+
+## Saber o que foi morto
+
+Um serviço morto por falta de memória não avisa: o container some ou reinicia, e o sintoma aparece em outro lugar (um `502` no proxy, um teste que termina com `Killed`). Há três formas de ver o que aconteceu:
+
+| Como | Quando usar |
+|---|---|
+| `automacli oom` | Depois do fato: lista quem morreu, quando, em qual slot e por quê. |
+| Notificação do [monitor](monitor.md#notificacoes) | Na hora: aviso de desktop em até 30 segundos. |
+| `GET /api/oom` e o campo `oomKills` de cada task | Para painéis e agentes de IA. |
+
+Como ler o motivo:
+
+* **`memory pressure for /automacli.slice/automacli-slot4.slice`**: o slot 4 sozinho passou do limite. O problema está naquela task.
+* **`memory pressure for /automacli.slice`**: a soma de todas as stacks passou do teto global. Quem morre é o maior consumidor, que pode não ser o culpado. Pare stacks que não está usando.
+* **`limite de memória de ... atingido`** (causa `kernel`): o slice bateu em `MemoryMax`.
+
+Um container é identificado pelo nome do serviço enquanto existir no Docker. Depois de removido, só se o monitor (ou um `automacli oom` anterior) já tinha visto o container; caso contrário aparece como `container <id> (removido)` nas mortes do oomd, ou só com o nome do processo nas mortes do kernel.
+
+## Limites padrão
+
+| Escopo | `MemoryHigh` | `MemoryMax` | Pressão para o oomd matar |
+|---|---|---|---|
+| Containers de um slot | 13 GB | 14 GB | 80% por 20 s |
+| Todas as stacks juntas | 20 GB | 22 GB | 70% por 20 s |
+| Processos do host de um slot | 6 GB | 8 GB | 60% por 20 s |
+| Todos os processos do host juntos | 10 GB | 12 GB | 60% por 20 s |
+
+Os valores partem de uma máquina com 30 GB. Uma stack completa com os front-ends compilando passa de 7 GB; o `MemoryHigh` fica perto do `MemoryMax` de propósito, porque é ao atingi-lo que o kernel começa a frear o grupo, e é essa frenagem que o `systemd-oomd` lê como pressão. Com o High baixo demais, o oomd mata um container durante um pico de compilação mesmo havendo memória sobrando na máquina.
+
+`MemoryHigh` desacelera o grupo antes de matar; `MemoryMax` é o teto. O `systemd-oomd` mata o cgroup (o container, ou o scope do processo do host) que mais pressiona a memória dentro do slice, e o teste falha com `Killed` ou código 137 em vez de travar a máquina.
+
+Para mudar, edite os `.slice` e `.conf` em `system/` e rode os scripts de instalação de novo. Antes de subir um limite, tente reduzir o paralelismo do teste (`--maxWorkers`): o peso de CPU não reduz o número de workers do Jest, que conta as CPUs do host.
+
+::: info Nota
+Nunca coloque o slice da sua sessão gráfica sob o `systemd-oomd`. Em muitos ambientes o compositor, os terminais e o navegador vivem no mesmo escopo, e um kill ali encerra a sessão inteira.
+:::
+
+---
+
+---
+url: https://gustavo210.github.io/automacli-releases/solucao-de-problemas.md
+---
+
+# Solução de problemas
+
+Comece sempre por `automacli profile` dentro da task: ele mostra qual arquivo de perfil está valendo e a porta de cada serviço.
+
+## "port is already allocated" ao subir a stack
+
+| Causa provável | Como conferir | Correção |
+|---|---|---|
+| O override não está sendo carregado | `docker compose config` não mostra as portas do slot | Com `-f` explícito, o Compose ignora o override: liste o Makefile/script em `compose.wireInto` ou acrescente `-f docker-compose.override.yml`. |
+| A stack compartilhada está parada | `automacli shared status` mostra `parado` | `automacli shared up`. Com o monitor rodando ela volta sozinha em até um minuto ([autostart](monitor.md#servicos-compartilhados-sempre-no-ar)). |
+| O serviço deveria ser compartilhado e não está no perfil | `automacli profile` não o marca como compartilhado | Adicione-o a `shared.services`. |
+| Duas portas colidem depois do deslocamento | Tabela de `automacli profile` com portas repetidas | Aumente `slots.offset`. |
+| `port is already allocated` ao subir a stack temporária de um script no repo base | Outro slot publica uma porta igual à do slot 0 (ex.: `adm-api` do slot 8 na `8808`) | Pare a stack daquele slot enquanto o script roda. Tasks criadas com a versão atual já não recebem slots que colidem. |
+
+## "all predefined address pools have been fully subnetted"
+
+O Docker reserva uma sub-rede para cada projeto compose e, por padrão, só tem 31. Cada slot usa uma, e comandos rodados sem `-p` fora da raiz da task (ou com `compose.projectNameEnv: false`) criam mais uma com o nome do diretório, que fica para trás depois do `run --rm`.
+
+Para liberar na hora, remova as redes que nenhum container usa:
+
+```sh
+docker network prune
+```
+
+Para não voltar a acontecer, aumente os pools em `/etc/docker/daemon.json` e reinicie o Docker:
+
+```json
+{
+  "default-address-pools": [{"base": "172.16.0.0/12", "size": 24}]
+}
+```
+
+Isso dá 4096 redes de 254 endereços e tira o Docker da faixa `192.168.x`, que costuma colidir com a rede local. O `scripts/install-system-limits.sh` já grava essa chave quando o `daemon.json` ainda não define `default-address-pools`; se já definir, ajuste à mão. Redes existentes mantêm a sub-rede antiga até serem recriadas.
+
+## `automacli profile` não mostra nenhuma porta
+
+* `compose.files` aponta para arquivos que não existem nesse diretório.
+* As portas não têm host fixo (`"3000"` sozinho) ou são faixas; declare-as em `ports.services`.
+* A porta de host vem de uma variável sem valor (`${API_PORT}:3000`): sem `.env`, nem o `docker compose config` nem a leitura direta do YAML conseguem resolvê-la. Crie o `.env` ou declare essas portas em `ports.services`.
+
+## A aplicação ainda chama a porta antiga
+
+O override só muda o Docker. A porta está escrita em algum arquivo que não entrou em `rewrite`:
+
+```sh
+grep -rn ':4000' --include='.env*' --include='package.json' .
+```
+
+Acrescente o arquivo a uma regra de [`rewrite`](perfil.md#rewrite). Se a porta é de um processo fora do compose, inclua-a em `ports.extra`. A reescrita acontece no `clone`; em uma task já criada, ajuste o arquivo à mão.
+
+## A task subiu com o banco vazio
+
+* O serviço de banco não está em `shared.services`, então cada task tem o seu.
+* O volume não está em `shared.volumes`.
+* `compose.projectName` difere do nome com que a sua stack principal roda. Os volumes compartilhados se chamam `<projectName>_<volume>`: confira com `docker volume ls`.
+
+## Todas as tasks perderam o banco ou o DNS de uma vez
+
+Os compartilhados estavam rodando dentro de uma task que foi parada (perfis com `shared.host: first-task`, ou stacks criadas antes da stack compartilhada). Confira com `automacli shared status` e suba a partir do repo base com `automacli shared up`, que move o que ainda estiver em alguma task.
+
+## `QueueDoesNotExist` depois de reiniciar a máquina (ou o ElasticMQ)
+
+As filas por slot (`marketplace-api-slot4`, `gerar-pagamento-slot4.fifo`) são criadas pela API e vivem na memória do ElasticMQ compartilhado: quando o container reinicia, só as do `queues.conf` voltam. `automacli shared status` mostra quantas faltam; `automacli shared up` (ou `--all`) recria todas. Com o monitor rodando e `shared.autostart` ligado, isso acontece sozinho em até um minuto.
+
+## O monitor mostra a task sem containers
+
+O projeto compose em execução não é o registrado no `.slot`. Isso acontece quando a stack foi iniciada com outro `-p` ou sem `COMPOSE_PROJECT_NAME`. Compare `cat .slot` com `docker compose ls`.
+
+## Cada task parece ocupar o disco inteiro de novo
+
+`du` e gerenciadores de arquivos mostram o tamanho aparente, que conta de novo os blocos compartilhados pelo reflink. Para ver o que cada task ocupa de fato:
+
+```sh
+btrfs filesystem du -s ~/tasks/task-*/
+```
+
+A coluna `Exclusive` é o que você recupera apagando a task. O [monitor](monitor.md#disco-aparente-e-real) mostra os dois números. O que faz uma task crescer é o que ela gera depois do clone: dependências reinstaladas e builds deixam de ser compartilhados.
+
+## O clone não usou reflink
+
+`cp --reflink` só funciona em Btrfs, XFS (com reflink habilitado) e APFS, com origem e destino no mesmo sistema de arquivos; em Btrfs o automacli prefere um snapshot do repo base. Sem reflink ele cai para `git clone --reference`, que reaproveita os objetos do repo base mas não traz as dependências instaladas. `automacli doctor` mostra a estratégia escolhida e por que as outras foram descartadas.
+
+## Um serviço parou de responder sem erro aparente
+
+Sintomas típicos: `502` no load balancer, container que reinicia sozinho, teste que termina com `Killed` ou código 137. Verifique se ele foi morto por falta de memória:
+
+```sh
+automacli oom --since 1h
+```
+
+Se aparecer na lista, veja [como ler o motivo](isolamento.md#saber-o-que-foi-morto).
+
+## Containers presos em "Restarting"
+
+Workers que dependem de um serviço compartilhado reiniciam em laço quando ele cai. Pare-os e suba a stack que hospeda os serviços compartilhados primeiro:
+
+```sh
+docker ps -aq --filter status=restarting | xargs -r -n 1 docker stop
+```
+
+## Perfil inválido
+
+A mensagem aponta o campo. Erros comuns: indentação do YAML, `mode` de `rewrite` diferente de `env`, `cli-flags` ou `urls`, e portas fora do formato `host:container`.
+
+## Owner ou repositório identificados errado
+
+O automacli lê `owner` e `repo` do `.slot` da task; sem `.slot`, do remoto `origin`; sem remoto, deduz do nome `task-<branch>-<owner>-<repo>`, o que falha quando owner ou repo têm hífen. Confira com `cat .slot` e `git remote get-url origin`.
+
+---
+
+---
+url: https://gustavo210.github.io/automacli-releases/releases.md
+---
+
+# Releases e CI/CD
+
+O automacli é distribuído como um **executável Linux autocontido** e como pacotes `.deb`, `.rpm` e `PKGBUILD`, publicados nos [GitHub Releases do repositório `automacli-releases`](https://github.com/Gustavo210/automacli-releases/releases), que é público e também hospeda esta documentação. O código continua no repositório `automacli`, privado. Ele não está no npm.
+
+O executável é um tarball com a CLI compilada, as dependências e o próprio Node.js. Quem instala não precisa ter Node na máquina.
+
+## Instalar a partir de um release
+
+```sh
+curl -fsSL https://github.com/Gustavo210/automacli-releases/releases/latest/download/install.sh | bash
+```
+
+O instalador detecta a arquitetura (x64 ou arm64), confere o SHA-256, extrai em `~/.local/share/automacli` e cria o link `~/.local/bin/automacli`. Rodar de novo atualiza para a última versão.
+
+| Quero... | Como |
+|---|---|
+| Uma versão específica | `bash install.sh v0.2.0` |
+| Outro diretório | `AUTOMACLI_HOME=/opt/automacli AUTOMACLI_BIN=/usr/local/bin bash install.sh` |
+| Instalar de outro repositório de releases | `AUTOMACLI_REPO=usuario/automacli-releases bash install.sh` |
+| Desinstalar | `rm -rf ~/.local/share/automacli ~/.local/bin/automacli` |
+
+O repositório de distribuição é público, então o `curl` acima funciona sem autenticação. Se um dia ele passar a ser privado, use o GitHub CLI autenticado, que o instalador detecta sozinho:
+
+```sh
+gh release download --repo Gustavo210/automacli-releases --pattern install.sh --output - | bash
+```
+
+### Pacotes e repositórios para distribuições
+
+Cada release traz pacotes prontos e atualiza dois repositórios servidos pelo GitHub Pages do `automacli-releases`:
+
+| Distribuição | Como instalar |
+|---|---|
+| Debian, Ubuntu e derivados | Repositório apt em `https://gustavo210.github.io/automacli-releases/apt` (suite `stable`, componente `main`, `amd64` e `arm64`), com `automacli.sources` e a chave `automacli.gpg` prontos |
+| Fedora, RHEL, openSUSE | Repositório rpm em `https://gustavo210.github.io/automacli-releases/rpm/<arch>`, com `automacli.repo` e `RPM-GPG-KEY-automacli`; RPMs e `repomd.xml` assinados |
+| Arch, Manjaro | Pacote `automacli-bin` no AUR, enviado pelo release quando a chave SSH da conta está configurada |
+
+Os comandos prontos estão em [Instalação › Pela sua distribuição](instalacao.md#pela-sua-distribuicao). Os
+repositórios guardam as três últimas versões de cada pacote; cada release também anexa os pacotes avulsos, com nome
+estável (`automacli_amd64.deb`, `automacli.x86_64.rpm`) e com versão (`automacli_0.2.0_amd64.deb`,
+`automacli-0.2.0-1.x86_64.rpm`), o `PKGBUILD`, o `.SRCINFO` e a chave pública.
+
+Os pacotes instalam em `/opt/automacli` com o comando em `/usr/bin/automacli`, declaram `git` como dependência e Docker
+como recomendação. Têm o mesmo conteúdo do tarball; a diferença é que o gerenciador de pacotes cuida de atualizar e
+remover.
+
+### Instalação manual
+
+```sh
+tar -xzf automacli-linux-x64.tar.gz -C ~/.local/share
+ln -s ~/.local/share/automacli/bin/automacli ~/.local/bin/automacli
+```
+
+## Para quem mantém o projeto
+
+As seções abaixo descrevem como as releases são produzidas. Elas valem para quem tem acesso ao repositório do código, que é privado; quem só instala o automacli não precisa delas.
+
+## Pipelines
+
+Os três ficam em `.github/workflows/`.
+
+| Workflow | Dispara em | O que faz |
+|---|---|---|
+| `ci.yml` | push na `main` e pull requests | Instala as dependências, compila e roda os testes. |
+| `release.yml` | push de uma tag `v*` ou manual, informando a tag | Compila, testa, empacota para `linux-x64` e `linux-arm64`, gera `.deb`, `.rpm` (assinado) e `PKGBUILD`, instala o `.deb` num Ubuntu e o `.rpm` num Fedora limpos, publica o release, atualiza os repositórios apt e rpm na `gh-pages` do `automacli-releases`, testa a instalação por eles e, com a chave do AUR, envia o `PKGBUILD`. |
+| `docs.yml` | push na `main` que toque `docs/**`, ou manual | Compila o site VitePress de `docs/` e publica na branch `gh-pages` do `automacli-releases`, com o mesmo `RELEASES_TOKEN`. |
+
+```mermaid
+flowchart LR
+    A[git push origin v0.2.0] --> B[Confere tag × package.json]
+    B --> C[Build + testes]
+    C --> D[oclif pack tarballs]
+    D --> P[nfpm: .deb, .rpm, PKGBUILD]
+    P --> E[Instala o .deb num Ubuntu limpo<br/>e executa o binário empacotado]
+    E --> F[GitHub Release<br/>tarballs, pacotes, SHA256SUMS, install.sh]
+```
+
+Cada release contém:
+
+| Arquivo | Conteúdo |
+|---|---|
+| `automacli-linux-x64.tar.gz` | Executável para Intel/AMD de 64 bits. |
+| `automacli-linux-arm64.tar.gz` | Executável para ARM de 64 bits. |
+| `SHA256SUMS` | Checksums dos tarballs, dos pacotes e do `PKGBUILD`. |
+| `install.sh` | Instalador. |
+| `automacli_{amd64,arm64}.deb` e `automacli_<versão>_{amd64,arm64}.deb` | Pacote Debian/Ubuntu, com nome estável e com versão. |
+| `automacli.{x86_64,aarch64}.rpm` e `automacli-<versão>-1.{x86_64,aarch64}.rpm` | Pacote Fedora/RHEL/openSUSE, com nome estável e com versão. |
+| `PKGBUILD`, `.SRCINFO` | Pacote `automacli-bin` para o AUR. |
+
+Os nomes não levam versão, para que `releases/latest/download/<arquivo>` aponte sempre para o mais recente.
+
+## Publicar uma versão
+
+A release numerada leva os tarballs, os pacotes `.deb`/`.rpm`, `PKGBUILD`, `SHA256SUMS`, `install.sh` e uma cópia do APK do app Android (`automacli-app.apk`, o mesmo da release rolante `app-latest`, que o workflow *App Android* mantém a cada merge na `main`; veja [App para o telefone](app.md)).
+
+```sh
+npm version 0.2.0 --no-git-tag-version     # atualiza o package.json
+git commit -am "chore: versão 0.2.0"
+git tag v0.2.0
+git push origin main v0.2.0
+```
+
+O workflow roda no repositório `automacli` (build, testes e empacotamento) e publica o release no `automacli-releases`, criando lá a tag de mesmo nome. As notas são geradas a partir dos commits do `automacli` e terminam com o link para o código-fonte da tag.
+
+Além do token, o environment `RELEASES_TOKEN` guarda `PACKAGES_GPG_PRIVATE_KEY`, a chave GPG (armored, sem senha) que
+assina os RPMs e os índices dos repositórios apt e rpm; sem ela o release falha com erro explícito. Opcionalmente,
+`AUR_SSH_PRIVATE_KEY` (e `AUR_USERNAME`, `AUR_EMAIL`), a chave SSH de uma conta no AUR com o pacote `automacli-bin`:
+com ela o release envia o `PKGBUILD` e o `.SRCINFO` ao AUR; sem ela, esse passo é pulado e o envio é manual. Os
+repositórios apt e rpm vivem em `/apt` e `/rpm` da branch `gh-pages`, ao lado do site; o `docs.yml` os preserva ao
+republicar a documentação, e os dois workflows compartilham o grupo de concorrência `gh-pages` para não se atropelarem.
+
+Para isso o workflow usa o secret `RELEASES_TOKEN`: um fine-grained PAT com `Contents: Read and write` no `automacli-releases`, guardado no **environment** `RELEASES_TOKEN` do `automacli` (o job declara `environment: RELEASES_TOKEN`; sem isso o secret chega vazio e o passo de publicação falha com erro explícito). O `automacli-releases` precisa ter ao menos um commit, porque um release não pode ser criado em repositório vazio.
+
+O workflow recusa a tag se ela não bater com a versão do `package.json`. Para republicar uma tag existente (por exemplo, depois de corrigir o workflow), use **Actions → Release → Run workflow** e informe a tag; os arquivos e as notas do release são substituídos.
+
+## Gerar o executável e os pacotes localmente
+
+```sh
+pnpm build
+pnpm exec oclif pack tarballs --targets linux-x64,linux-arm64 --no-xz
+mkdir -p release && for a in x64 arm64; do mv dist/automacli-v*-linux-$a.tar.gz release/automacli-linux-$a.tar.gz; done
+packaging/build-packages.sh 0.1.0 release     # precisa do nfpm (https://nfpm.goreleaser.com)
+```
+
+## Por que um tarball e não um arquivo único
+
+A CLI usa oclif, que descobre os comandos lendo o diretório `dist/commands` em tempo de execução, e é escrita em ES Modules. As ferramentas que produzem um único arquivo executável (Node SEA, `bun build --compile`) exigem todo o código em um bundle estático, o que não combina com essa descoberta dinâmica. O tarball com o Node embutido é o formato suportado pelo próprio oclif e entrega o mesmo resultado prático: baixar, extrair e executar, sem instalar nada antes.

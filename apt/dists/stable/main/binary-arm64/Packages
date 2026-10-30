@@ -1,0 +1,40 @@
+Package: automacli
+Architecture: arm64
+Version: 0.2.0
+Priority: optional
+Section: devel
+Maintainer: Gustavo210 <noreply@github.com>
+Installed-Size: 158561
+Depends: git
+Recommends: docker-ce | docker.io
+Filename: pool/main/a/automacli/automacli_0.2.0_arm64.deb
+Size: 52809722
+MD5sum: 29c4d25a211564182a761436f4d76965
+SHA1: 50845adeaa6b1d4e3903c446d6d74eb895efdc95
+SHA256: 47ce3d9ee1dd046d0ea4b7c7c9d76be75354a324b370ff4559d2329cff62090c
+SHA512: 8f5b7c69d1ff612163afc7ba90031a1bcd005e331a6e273d33db5dc7452dafe586946a40151f77a9af77089ea64a0a849d6da0b67dadd3d7e67d12467dd3c8b9
+Homepage: https://github.com/Gustavo210/automacli-releases
+Description: Várias branches do mesmo repositório lado a lado, cada uma com sua stack
+ Docker isolada em portas próprias. Traz o Node.js embutido.
+License: MIT
+
+Package: automacli
+Architecture: arm64
+Version: 0.3.0
+Priority: optional
+Section: devel
+Maintainer: Gustavo210 <noreply@github.com>
+Installed-Size: 158736
+Depends: git
+Recommends: docker-ce | docker.io
+Filename: pool/main/a/automacli/automacli_0.3.0_arm64.deb
+Size: 52883132
+MD5sum: b53a06b8dcb4b72be217fd6115a074f9
+SHA1: b2b4b705392d76d9dd417b6e22949b244514da38
+SHA256: 8830fafdcfaad13285ff6bc502038511f70cff6b6b62fe1e83986880d73d5d13
+SHA512: 952d15e1610dea6071075c9eff096b14f412adb77106ae61ff7d139db895fb07a6c64b0b70b62073a36dd760852b7d7e0e7dfc5918b3a6b87c9f49095e27a083
+Homepage: https://github.com/Gustavo210/automacli-releases
+Description: Várias branches do mesmo repositório lado a lado, cada uma com sua stack
+ Docker isolada em portas próprias. Traz o Node.js embutido.
+License: MIT
+

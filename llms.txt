@@ -1,0 +1,30 @@
+# automacli
+
+> Várias branches do mesmo repositório rodando lado a lado, cada uma com sua stack Docker isolada.
+
+Cada branch vira uma task com diretório, slot e portas próprios. Bancos e caches sobem uma vez e são compartilhados. Sem conflito de porta, sem reinstalar dependências, sem esperar a vez.
+
+## Table of Contents
+
+### Começando
+
+- [Por que o automacli](https://gustavo210.github.io/automacli-releases/por-que.md)
+- [Instalação](https://gustavo210.github.io/automacli-releases/instalacao.md)
+- [Requisitos e ambiente](https://gustavo210.github.io/automacli-releases/requisitos.md)
+- [Como funciona](https://gustavo210.github.io/automacli-releases/como-funciona.md)
+
+### Referência
+
+- [Perfil do repositório](https://gustavo210.github.io/automacli-releases/perfil.md)
+- [Exemplos](https://gustavo210.github.io/automacli-releases/exemplos.md)
+- [Comandos](https://gustavo210.github.io/automacli-releases/comandos.md)
+- [Monitor](https://gustavo210.github.io/automacli-releases/monitor.md)
+- [App para o telefone (Android)](https://gustavo210.github.io/automacli-releases/app.md)
+- [MCP para agentes de IA](https://gustavo210.github.io/automacli-releases/mcp.md)
+- [Isolamento de recursos](https://gustavo210.github.io/automacli-releases/isolamento.md)
+
+### Operação
+
+- [Solução de problemas](https://gustavo210.github.io/automacli-releases/solucao-de-problemas.md)
+- [Releases e CI/CD](https://gustavo210.github.io/automacli-releases/releases.md)
+
